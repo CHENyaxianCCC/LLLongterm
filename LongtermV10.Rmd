@@ -1,0 +1,2581 @@
+---
+title: "Longtern_Rs_analysis"
+output: html_document
+---
+
+## install and load packages
+
+```{r preliminaries, message=TRUE, include=FALSE, echo=FALSE}
+# Set chunks defaults; these options will be applied to all subsequent chunks
+knitr::opts_chunk$set(results = 'hide', message = TRUE, include = TRUE, echo = FALSE,
+                      fig.height = 4.5, fig.width = 8, cache = T)
+# install.packages('cowplot')
+# Load required packages
+library(cowplot)
+library(data.table)
+library(ggplot2)
+theme_set(theme_bw())
+library(lubridate)
+library(kableExtra)
+library(cowplot)
+# library(knitr)
+library("ggpubr")
+library(reshape)
+# install.packages('Kendall')
+library(zoo)
+library(Kendall)
+library(tidyr)
+library(lubridate)
+library(maps)
+library(mapdata)
+# devtools::install_github("bpbond/cosore")
+# library(cosore)
+library(lubridate)
+# Source all needed functions
+source('Rcode/functions.R')
+# Much of this was presented at AGU 2018
+library(readr)
+library(lattice)
+library(mblm)  # for Theil-Sen robust trend test
+library(grid)
+library(gridExtra)
+library(hexbin)
+library(dplyr)
+library(patchwork)
+library(cowplot)
+library(broom)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(lwgeom)
+library(tidyverse)
+library(tidyr)
+library(drake)
+library(ncdf4) 
+library(scales)
+library(RColorBrewer)
+library(png)
+library(magick)
+
+```
+
+## load functions
+```{r}
+library(readxl)
+source('Rcode/functions.R')
+```
+
+## prepare and load data
+
+```{r load data}
+OUTPUT_DIR		<- "outputs"
+DATA_DIR <- 'data'
+plot_dir <- "outputs/agu_slides/"
+# Jian: get data: directly read rather than using drake code
+# srdb_v4 <- drake::readd(srdb_v4) 
+srdb_v4 <- read.csv('srdbv4/srdbv4.csv', stringsAsFactors=F)
+srdb_v4$Q10_all <- coalesce(srdb_v4$Q10_0_10, srdb_v4$Q10_0_20, 
+                            srdb_v4$Q10_5_15, srdb_v4$Q10_10_20, srdb_v4$Q10_other1, srdb_v4$Q10_other2)
+# srdb_v5 <- drake::readd(srdb_v5)
+srdb_v5 <- read.csv('srdbv4/srdb-data.csv', stringsAsFactors=F)
+PT_Del <- read.csv('data/GlobalTempPrecipTimeSeries_Del.csv')
+# LongTerm <- read.csv('data/LongTerm.csv')
+longterm = read_xlsx('LongTerm.xlsx', 1)
+# longterm_Tm <- read.csv('data/LongTerm_tm.csv')
+longterm_Tm = read_xlsx('LongTerm.xlsx', 2)
+# longterm <- drake::readd(LongTerm)
+# longterm_Tm <- drake::readd(LongTerm_tm)
+
+
+MGRsD = read.csv('data/MGRsD_SRDBV5.csv')
+MGRsD %>% 
+  filter(Rs_Norm > 0 & !is.na(Rs_Norm) & !is.na(MiddleClimate)) %>% 
+  mutate(RsLog = log(Rs_Norm)) ->
+  MGRsD
+
+longterm <- longterm %>% filter(!is.na(X1))
+
+IGBP <- read.csv("data/extdata/IGBP_Koppen_MODIS.csv")
+left_join(srdb_v4, IGBP, by = c("Lat_Round" = "Latitude", "Long_Round" = "Longitude")) ->
+  srdb_v4                                             
+
+srdb_v4 %>% 
+  dplyr::select(Q10_all, MiddleClimate) %>% 
+  filter(Q10_all < 10) %>% 
+  na.omit() %>% 
+  group_by (MiddleClimate) %>% 
+  summarise(Q10_mean = mean(Q10_all), obs = n(), se = sd(Q10_all)/sqrt(obs)) ->
+  srdb_v4_agg
+
+# cosore data
+cosore_all <- readRDS("data/cosore_all.rds")
+cosore_site <- read.csv("data/csr_site.csv")
+cosore_site$CSR_DATE_BEGIN <- as.Date(cosore_site$CSR_DATE_BEGIN, "%m/%d/%Y")
+cosore_site$CSR_DATE_END <- as.Date(cosore_site$CSR_DATE_END, "%m/%d/%Y")
+lm_results <- longtern_lm(longterm, longterm_Tm)
+```
+
+## plot temperature annomaly
+
+```{r, fig.width=8, fig.height=6}
+# temperature annomaly time series
+PT_Del %>% 
+  ggplot(aes(Year, Tm_Annomaly)) +
+  geom_bar(stat = "identity", alpha = 0.85, fill = "white", color = "black") +
+  geom_smooth(color = "red", method = "lm", se = FALSE) +
+  geom_smooth(color = "blue", method = "loess", se = FALSE, linetype = 2) +
+  facet_wrap(~MiddleClimate, nrow = 4, scales = "free") +
+  labs(x = "Year (1961-2014)", 
+       y = expression(T[Air]~anomaly~(degree~C)))
+# ggsave("outputs/FigureSX. T anomaly.jpg", width = 8, height = 6, dpi = 300, units = "in")
+```
+
+
+## Find long term (n\>4) studies from srdb-v5 and MGRsD
+
+```{r find out longterm studies from srdb}
+
+# get study number from srdb_v5 which have more than 5 years of Rs measurement
+# 10977 can be read from the fiture
+study_exc <- c(1654,2298,2656,2927,3197,3254,3301,3302,3581,4174,4333,4564,4864,4938,
+               5278,5519,5935,6347,6451,6504,6935,
+               7290,7636,10266,
+               # already in the longterm data
+  
+               # checked in srdb 
+               467,864,1980,2018,2601,2926,2960,
+               3390,4212,4234,4270,4979,5545,5984,6816,7087,
+               7613,8699,8700,9845,10449,10624,10820,10951,10977,11054,11913,
+               
+               # checked in mgrsd
+               4257,4883,5969,6576,7300,7659,9474,11083,11255,11878,11930,
+               
+               # checked github issue
+               4333,4348,10614,10466,11054,
+               
+               # checked srdb by study_number and site_id
+               1891,2056,2904,3053,4018,4442,4894,5162,5688,6438,6975,7634,8479,
+               8534,10066,10483,10564,10910,11366)
+
+## Find long term (n>4) studies from MGRsD
+MGRsD %>% 
+  dplyr::select(Study_number, Site_ID, Meas_Year) %>% 
+  group_by(Study_number, Site_ID) %>% 
+  count(Meas_Year) %>% 
+  group_by(Study_number, Site_ID) %>% 
+  summarise(n_year = n()) %>% 
+  filter(n_year > 4) %>% 
+  arrange(Study_number) %>% 
+  filter(Study_number %!in% study_exc)
+
+## Find long term (n>4) studies from srdb-v5
+srdb_v5 %>% 
+  filter(!is.na(Rs_annual)) %>% 
+  dplyr::select(Rs_annual, Study_number, YearsOfData) %>% 
+  count(Study_number, YearsOfData) %>% 
+  filter(YearsOfData>=5 & Study_number %!in% study_exc)
+
+srdb_v5 %>% 
+  filter(!is.na(Rs_annual)) %>% 
+  dplyr::select(Rs_annual, Study_number, Site_ID) %>% 
+  count(Study_number, Site_ID) %>% 
+  filter(Study_number %!in% study_exc) %>% 
+  filter(n > 4)
+```
+
+```{r data}
+# plot a site map for the long term data collected
+# Step 2: Plot
+# sort(unique(counties$region))
+cosore_site %>% 
+    filter(grepl('Rh', CSR_MSMT_VAR)) %>% 
+    mutate(Latitude = CSR_LATITUDE,
+           Longitude = CSR_LONGITUDE,
+           count = year(CSR_DATE_END) - year(CSR_DATE_BEGIN),
+           Data = "COSORE") %>% 
+    dplyr::select(Latitude, Longitude, count, Data) ->
+  csr_rh_site
+
+bind_rows(
+  MGRsD %>% 
+    filter(!is.na(Rs_Norm)) %>% 
+    dplyr::select(Latitude, Longitude, Meas_Year, Study_number) %>% 
+    unique() %>% 
+    group_by(Latitude, Longitude) %>% 
+    summarise(count = n()) %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "DGRsD")
+)
+  
+  srdb_v4 %>% 
+    filter(!is.na(Q10_all) & !is.na(Latitude)) %>% 
+    mutate(Meas_Year = Study_midyear) %>% 
+    dplyr::select(Latitude, Longitude, Meas_Year, Study_number) %>% 
+    unique() %>% 
+    group_by(Latitude, Longitude) %>% 
+    summarise(count = n()) %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "SRDB")
+  
+  csr_rh_site
+```
+#linear model
+```{r lm results}
+# Calculate means
+lm_results_mean <- tibble(
+  tm_slope_mean = lm_results$first_b_tm %>% mean(),
+  Rs_slope_mean = lm_results$first_b %>% mean(),
+  Rs_slope_se_mean = lm_results$first_b_se %>% mean(),
+  Year_mean = lm_results$n %>% mean()
+)
+
+# Classify points based on quadrants
+lm_results <- lm_results %>%
+  mutate(
+    quadrant = case_when(
+      first_b_tm > 0 & first_b > 0 ~ "First",
+      first_b_tm < 0 & first_b < 0 ~ "Third",
+      TRUE ~ "Other"
+    )
+  )
+
+# Create the plot
+plot_lm_results <- lm_results %>%
+  ggplot(aes(x = first_b_tm, y = first_b)) +
+geom_linerange(aes(ymin = first_b - 2 * first_b_se, ymax = first_b + 2 * first_b_se),
+                 color = "grey", show.legend = FALSE) +
+  geom_point(aes(shape = quadrant), size = 3, alpha = 0.75, color = "black") +
+   scale_shape_manual(values = c(First = 24, Third = 22, Other = 21)) +
+  labs(x = expression(Slope~of~air~temperature~(degree~C~year^-1)),
+       y = expression(Slope~of~soil~respiration~(g~C~m^-2~year^-1))) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "black", size = 1) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black", size = 1) +
+  geom_smooth(aes(x = first_b_tm, y = first_b), method = "lm", se = TRUE, fill = "skyblue", show.legend = FALSE) +
+  guides(shape = guide_legend("Quadrant")) 
+
+# Add mean points and segments
+plot_lm_results <- plot_lm_results +
+  geom_point(aes(x = tm_slope_mean, y = Rs_slope_mean), color = "black", size = 3.5, data = lm_results_mean) +
+  geom_segment(aes(x = tm_slope_mean, y = Rs_slope_mean - 2*Rs_slope_se_mean,
+                   xend = tm_slope_mean, yend = Rs_slope_mean + 2*Rs_slope_se_mean),
+               color = "black", size = 1, data = lm_results_mean)
+# 打印图形
+print(plot_lm_results)
+ #save_agu_plot("lm_overall_3.png")
+```
+总体上显著，p-value: 0.03997，但只有10records,10.75%显著上升，不显著下降的占比最多，46%。
+```{r site map, fig.height = 4, fig.width = 8}
+  longterm %>% 
+    dplyr::select(Latitude, Longitude, count) %>% 
+    mutate(Data = "longterm")
+#分出四个趋势画lm_results  画比例饼图
+TEMP_results <- lm_results %>%
+  mutate(TEMP_trend = case_when(
+     first_b_tm < 0 & p_b_tm >= 0.05 ~ "1TEMP_Decrease but not Significant",
+     first_b_tm < 0 & p_b_tm < 0.05 ~ "2TEMP_Significant Decrease",
+     first_b_tm > 0 & p_b_tm >= 0.05 ~ "3TEMP_Increase but not Significant",
+     first_b_tm > 0 & p_b_tm < 0.05 ~ "4TEMP_Significant Increase",))
+# 计算每个趋势的数量和百分比
+TEMP_group_counts <- TEMP_results %>%
+  group_by(TEMP_trend) %>%
+  summarise(n = n()) %>%
+  mutate(percentage = n / sum(n)) %>%
+  arrange(desc(TEMP_trend)) %>%
+  mutate(midpoint = cumsum(percentage) - percentage / 2,
+         label_position = ifelse(n < 5, 3.1, 2.3), # 小于5的值标签放在更远的位置
+         segment_position = ifelse(n < 5, 2.7, 2), # 小于5的值连接线的终点
+         hjust = ifelse(n < 5, 0, 0.5)) # 小于5的值左对齐，其余居中
+
+Colors <- c("#789cf2","#2279B0", "#EE9094" ,"#b12222" )
+names(Colors) <- c("1TEMP_Decrease but not Significant",  "2TEMP_Significant Decrease","3TEMP_Increase but not Significant", "4TEMP_Significant Increase")
+labels <- c("Decrease but not Significant", "Significant Decrease", "Increase but not Significant", "Significant Increase")
+
+# 绘制环形图并添加标注
+plot_TEMP <- ggplot(TEMP_group_counts, aes(x = 2, y = percentage, fill = TEMP_trend)) +  
+  geom_bar(stat = "identity", width = 1) +
+  coord_polar("y", start = 0) +
+  scale_fill_manual(values = Colors, labels = labels) +
+  theme_void() +
+  theme(legend.position = "right") +
+  labs(title = "b", fill = "Trend") +
+  annotate("text", x = 0, y = 0, label = "Tair", size = 6) +
+  # 添加标签
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 6, color = "black") +
+  # 添加连接线
+  geom_segment(data = TEMP_group_counts %>% filter(n < 5), 
+               aes(x = 2, xend = segment_position, y = midpoint, yend = midpoint),
+               color = "black")
+plot_TEMP
+
+
+# 将 longterm 中的经纬度和 count 信息复制到 TEMP_results
+TEMP_results <- TEMP_results %>%
+  left_join(longterm %>% select(SiteID, Latitude, Longitude, count), by = c("ID" = "SiteID"))
+
+# 创建 longterm 和 significant_increase_sites 数据框
+longterm_sites <- TEMP_results %>% filter(TEMP_trend != "TEMP_Significant Increase")
+significant_increase_sites <- TEMP_results %>% filter(TEMP_trend == "TEMP_Significant Increase")
+
+# 新的颜色映射
+Colors <- c("1TEMP_Decrease but not Significant" = "#789cf2", 
+            "2TEMP_Significant Decrease" = "#2279B0", 
+            "3TEMP_Increase but not Significant" = "#EE9094", 
+            "4TEMP_Significant Increase" = "#b12222")
+
+# 创建地图图形
+site_plot2 <- ggplot(data = map_data("world")) + 
+  geom_polygon(aes(x = long, y = lat, group = group), color = "white", fill = 'gray') +
+  guides(fill = FALSE) +
+  geom_jitter(data = longterm_sites, aes(x = Longitude, y = Latitude, size = count, color = TEMP_trend), 
+              stroke = 1, shape = 21) +
+  geom_jitter(data = significant_increase_sites, aes(x = Longitude, y = Latitude, size = count, color = TEMP_trend), 
+              stroke = 1, shape = 21) +
+  scale_x_continuous(name = NULL, breaks = seq(-180, 180, 60), labels = seq(-180, 180, 60)) +
+  scale_y_continuous(limits = c(-60, 90), name = NULL,breaks = seq(-60, 90, 30), labels = seq(-60, 90, 30)) +
+  scale_size_continuous(name = "Years (yr)") +
+  scale_color_manual(
+    values = Colors, 
+    labels = c("1TEMP_Decrease but not Significant" = "Decrease but not Significant", 
+               "2TEMP_Significant Decrease" = "Significant Decrease", 
+               "3TEMP_Increase but not Significant" = "Increase but not Significant", 
+               "4TEMP_Significant Increase" = "Significant Increase"),
+    name = "Site Type") +
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        legend.position = c(0.03, 0.03), legend.justification = c(0, 0),
+        legend.key.size = unit(0.3, "cm"), legend.text = element_text(size = 6),
+        legend.title = element_text(size = 8)) +
+  guides(size = guide_legend(order = 1, override.aes = list(col = "#5989A5")),
+         color = guide_legend(order = 2)) +
+  labs(title = "a")
+print(site_plot2)
+
+# 创建直方图
+suc_meas_years <- data.frame(n = lm_results$n)
+plot_years <- ggplot(data = suc_meas_years) +
+  geom_histogram(aes(x = n), bins = 50) +
+  labs( title = "c" , x = expression(Successive~measurement~years~(yr)), y = "Count")+
+  theme_minimal()+  # 使用简洁的主题
+  theme(panel.grid.minor = element_blank(), 
+        panel.grid.major = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA))  
+plot_years
+
+#生态系统类型占比
+library(fuzzyjoin)
+# 四舍五入到最近的0.1度
+IGBP$Latitude <- round(IGBP$Latitude, 1)
+IGBP$Longitude <- round(IGBP$Longitude, 1)
+# 进行匹配
+matched_data <- difference_inner_join(IGBP, longterm, 
+                                      by = c("Latitude", "Longitude"), 
+                                      max_dist = 0.27)
+
+# 计算每个生态系统类型的数量绘制环形图
+ecosystem_counts <- matched_data %>%
+  count(Ecosystem)
+ecosystem_percentages <- ecosystem_counts %>%
+  mutate(percentage = n / sum(n)) %>%
+  arrange(desc(Ecosystem)) %>%
+  mutate(cumulative = cumsum(percentage))
+# 计算每个部分的中心位置
+ecosystem_percentages <- ecosystem_percentages %>%
+  mutate(midpoint = cumulative - (0.5 * percentage))
+
+# 定义条件，筛选出值小于5的部分
+ecosystem_percentages <- ecosystem_percentages %>%
+  mutate(label_position = ifelse(n < 5, 4.8, 3.3),  # 小于5的值放在外侧，增加到4
+         segment_position = ifelse(n < 5, 4.3, 3),  # 小于5的连接线终点增加到3.7
+         hjust = ifelse(n < 5, 0, 0.5))  # 外侧标签左对齐，内侧标签居中
+
+# 绘制环形图并添加标签和连接线
+plot_ecosystem <- ggplot(data = ecosystem_percentages) +
+  geom_bar(aes(x = 3, y = percentage, fill = Ecosystem), stat = "identity", width = 1.2, color = "white", linewidth = 0.8) +
+  coord_polar("y", start = -pi / -20) +
+  theme_void() +
+  xlim(0, 4.85)  +
+  labs(title = "d", x = "Ecosystem Type", y = "") +
+  theme(legend.position = "right",
+        legend.key.width = unit(0.5, "cm"),
+        legend.key.height = unit(0.2, "cm"),
+        plot.margin = margin(0, 0, 0, 0, "cm")) +
+  scale_fill_discrete(breaks = rev(ecosystem_percentages$Ecosystem)) +
+  # 添加连接线
+  geom_segment(aes(x = 3, xend = segment_position, y = midpoint, yend = midpoint), 
+               data = ecosystem_percentages %>% filter(n < 5), color = "black") +
+  # 添加标签
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 3)
+plot_ecosystem
+
+# 将plot_ecosystem转换为grob对象
+ecosystem_grob <- ggplotGrob(plot_ecosystem)
+plot_years_with_ecosystem <- plot_years +
+  annotation_custom(grob = ecosystem_grob, 
+                    xmin = 7, xmax = 32, # 调整这些值来控制 plot_ecosystem 在 x 方向的位置和大小
+                    ymin = 9, ymax = 32) +
+  theme(plot.margin = margin(0, 0, 0, 0, "cm"))
+plot_years_with_ecosystem
+
+
+LM_RESULT <- lm_results %>%
+  mutate(Trend_RESULT = case_when(
+    first_b < 0 & p_b >= 0.05 ~ "1 Decrease but not Significant",
+    first_b < 0 & p_b < 0.05 ~ "2 Significant Decrease",
+    first_b > 0 & p_b >= 0.05 ~ "3 Increase but not Significant",
+    first_b > 0 & p_b < 0.05 ~ "4 Significant Increase")) 
+# 计算每个趋势的数量和百分比
+LM_RESULT_group_counts <- LM_RESULT %>%
+  group_by(Trend_RESULT) %>%
+  summarise(n = n()) %>%
+  mutate(percentage = n / sum(n)) %>%
+  arrange(desc(Trend_RESULT)) %>%
+  mutate(midpoint = cumsum(percentage) - percentage / 2,
+         label_position = ifelse(n < 5, 3.1, 2.3), # 小于5的值标签放在更远的位置
+         segment_position = ifelse(n < 5, 2.7, 2), # 小于5的值连接线的终点
+         hjust = ifelse(n < 5, 0, 0.5)) # 小于5的值左对齐，其余居中
+
+# 颜色和标签定义
+Colors <- c("darkgray", "#5989A5","#FDCCA5" ,"#EF797E")
+names(Colors) <- c("1 Decrease but not Significant", "2 Significant Decrease", "3 Increase but not Significant", "4 Significant Increase")
+labels <- c("Decrease but not Significant", "Significant Decrease", "Increase but not Significant", "Significant Increase")
+
+plot_LM_RESULT <- ggplot(LM_RESULT_group_counts, aes(x = 2, y = percentage, fill = Trend_RESULT)) + 
+   geom_bar(stat = "identity", width = 1) +
+   coord_polar("y", start = 0) +
+   scale_fill_manual(values = Colors, labels = labels) +
+   theme_void() +
+   theme(legend.position = "right") +
+   labs(title = "e", fill = "Trend") +
+  annotate("text", x = 0, y = 0, label = "Rs", size = 7)+
+  # 添加标签
+  geom_text(aes(x = label_position, y = midpoint, label = n, hjust = hjust), size = 6, color = "black") +
+  # 添加连接线
+  geom_segment(data = LM_RESULT_group_counts %>% filter(n < 5), 
+               aes(x = 2, xend = segment_position, y = midpoint, yend = midpoint),
+               color = "black") 
+plot_LM_RESULT
+
+
+row1 <- site_plot2 + plot_TEMP+ plot_layout(widths = c(2, 1))
+row2 <- plot_years_with_ecosystem + plot_LM_RESULT+ plot_layout(widths = c(2, 1))
+plot_Fig1N2 <- (row1 / row2) + plot_layout(heights = c(1, 1))
+print(plot_Fig1N2)
+save_agu_plot("plot_Fig1N2.png", width = 10.5, height = 6)
+```
+
+
+```{r lm_3sub}
+LM_RESULT <- lm_results %>%
+  mutate(Trend_RESULT = case_when(
+    first_b > 0 & p_b >= 0.05 ~ "Increase but not Significant",
+    first_b < 0 & p_b >= 0.05 ~ "Decrease but not Significant",
+    first_b < 0 & p_b < 0.05 ~ "Significant Decrease",
+    first_b > 0 & p_b < 0.05 ~ "Significant Increase"
+  ))
+plot_Trend <- function(data, Trend_name) {
+  plot_data <- data %>%
+    filter(Trend_RESULT == Trend_name) %>%
+    ggplot(aes(x = first_b_tm, y = first_b)) +  
+  geom_point(aes(size = n), alpha = 0.75, col = "gray") +
+    labs(x = expression(Slope~of~air~temperature~(degree~C~year^-1)),
+         y = expression(Slope~of~soil~respiration~(g~C~m^-2~year^-1))) +
+    geom_hline(yintercept = 0, linetype = "dashed",
+               color = "red", size = 1) +
+    geom_pointrange(aes(ymin = first_b - 2 * first_b_se,
+                         ymax = first_b + 2 * first_b_se),
+                    col = "gray",
+                    show.legend = FALSE) +
+    geom_smooth(mapping = aes(x = first_b_tm, y = first_b),
+                method = "lm",
+                se = T, fill = "skyblue",
+                show.legend = FALSE) +
+    guides(size = guide_legend("Year (n)"))
+  
+  lm_model <- lm(first_b ~ first_b_tm, data = data)
+  # 获取回归系数
+  coefs <- coef(lm_model)
+  
+  # 获取R平方值
+  r_squared <- summary(lm_model)$r.squared
+  
+  # 创建回归方程字符串
+  equation <- paste0("y = ", round(coefs[2], 2), "x + ", round(coefs[1], 2))
+  
+  # 创建R平方字符串
+  r_squared_text <- paste0("R^2 = ", round(r_squared, 2))
+  # 计算P值
+  summary_model <- summary(lm_model)
+  p_value <- summary_model$coefficients[2, 4]
+  p_value_text <- paste0("P = ", round(p_value, 3))
+
+  
+  data_mean <-
+    tibble(tm_slope_mean = data$first_b_tm %>% mean(),
+           Rs_slope_mean = data$first_b %>% mean(),
+           Rs_slope_se_mean = data$first_b_se %>% mean(),
+           Year_mean = data$n %>% mean())
+
+  plot_data <- plot_data +
+    geom_point(aes(x = tm_slope_mean, y = Rs_slope_mean),
+               col = "black", size = 3.5, data = data_mean) +
+    geom_segment(aes(x = tm_slope_mean, y = Rs_slope_mean - 2 * Rs_slope_se_mean,
+                      xend = tm_slope_mean, yend = Rs_slope_mean + 2 * Rs_slope_se_mean),
+                col = "black", size = 1,
+                data = data_mean)
+
+  subx1 <- ggplot(data, aes(x = first_b_tm)) +
+    geom_histogram(bins = 50, fill = "white", col = "black") +
+    theme_void()
+
+  suby1 <- ggplot(data, aes(x = first_b)) +
+    geom_histogram(bins = 30, fill = "white", col = "black") +
+    theme_void() +
+    coord_flip()
+
+  final_plot <- (subx1 + plot_spacer() + plot_data + suby1) +
+    plot_layout(
+      ncol = 2,
+      nrow = 2,
+      widths = c(4, 1),
+      heights = c(1, 4))
+
+  print(final_plot)
+  return(list(equation = equation, r_squared = r_squared_text, p_value = p_value_text))
+}
+
+lm_results_significant_decrease <- LM_RESULT %>%
+  filter(Trend_RESULT =="Significant Decrease")
+lm_results_not_significant_decrease <- LM_RESULT %>%
+  filter(Trend_RESULT == "Decrease but not Significant")
+lm_results_not_significant_increase <- LM_RESULT %>%
+  filter(Trend_RESULT == "Increase but not Significant")
+lm_results_significant_increase <- LM_RESULT %>%
+  filter(Trend_RESULT == "Significant Increase")
+  
+
+plot_1 <- plot_Trend(LM_RESULT %>% filter(Trend_RESULT == "Significant Decrease"), "Significant Decrease")
+plot_2 <- plot_Trend(LM_RESULT %>% filter(Trend_RESULT == "Decrease but not Significant"), "Decrease but not Significant")
+plot_3 <- plot_Trend(LM_RESULT %>% filter(Trend_RESULT == "Increase but not Significant"), "Increase but not Significant")
+plot_4 <- plot_Trend(LM_RESULT %>% filter(Trend_RESULT == "Significant Increase"), "Significant Increase")
+
+
+##save_agu_plot("plot_lm.png")
+
+lm_sub_summary <- LM_RESULT %>%
+  group_by(Trend_RESULT) %>%
+  summarise(Count = n()) %>%
+  mutate(Comments = "")
+
+# 调用plot_Trend函数并更新lm_sub_summary
+results <- plot_Trend(lm_results_significant_decrease, "Significant Decrease")
+lm_sub_summary$Comments[lm_sub_summary$Trend_RESULT == "Significant Decrease"] <- paste(results$equation, results$r_squared, results$p_value)
+
+results <- plot_Trend(lm_results_not_significant_decrease, "Decrease but not Significant")
+lm_sub_summary$Comments[lm_sub_summary$Trend_RESULT == "Decrease but not Significant"] <- paste(results$equation, results$r_squared, results$p_value)
+
+results <- plot_Trend(lm_results_not_significant_increase, "Increase but not Significant")
+lm_sub_summary$Comments[lm_sub_summary$Trend_RESULT == "Increase but not Significant"] <- paste(results$equation, results$r_squared, results$p_value)
+
+results <- plot_Trend(lm_results_significant_increase, "Significant Increase")
+lm_sub_summary$Comments[lm_sub_summary$Trend_RESULT == "Significant Increase"] <- paste(results$equation, results$r_squared, results$p_value)
+
+print(lm_sub_summary)
+
+#library(gridExtra)
+# 创建表格图形对象
+#lm_sub_summary_plot <- tableGrob(lm_sub_summary)
+# 保存为png文件
+#png("lm_sub_summary4trend.png", width = 7, height = 5, units = "in", res = 300)
+#grid.draw(lm_sub_summary_plot)
+#dev.off()
+
+```
+
+
+```{r lm_3sub_2}
+T_nonpositive <- lm_results %>% filter(first_b_tm <= 0)
+T_positive <- lm_results %>% filter(first_b_tm > 0)
+T_all <- lm_results
+# Calculate regression results
+lm_model_nonpositive <- lm(first_b ~ first_b_tm, data = T_nonpositive)
+coefs_nonpositive <- coef(lm_model_nonpositive)
+r_squared_nonpositive <- summary(lm_model_nonpositive)$r.squared
+p_value_nonpositive <- summary(lm_model_nonpositive)$coefficients[2, 4]
+equation_nonpositive <- sprintf("y = %.2f * x %+.2f", coefs_nonpositive[2], coefs_nonpositive[1])
+
+lm_model_positive <- lm(first_b ~ first_b_tm, data = T_positive)
+coefs_positive <- coef(lm_model_positive)
+r_squared_positive <- summary(lm_model_positive)$r.squared
+p_value_positive <- summary(lm_model_positive)$coefficients[2, 4]
+equation_positive <- sprintf("y = %.2f * x %+.2f", coefs_positive[2], coefs_positive[1])
+
+lm_model_all <- lm(first_b ~ first_b_tm, data = T_all)
+coefs_all <- coef(lm_model_all)
+r_squared_all <- summary(lm_model_all)$r.squared
+p_value_all <- summary(lm_model_all)$coefficients[2, 4]
+equation_all <- sprintf("y = %.2f * x %+.2f", coefs_all[2], coefs_all[1])
+
+# Create regression results data frame
+regression_results <- data.frame(
+  Subset = c("All", "Non-positive", "Positive"),
+  Equation = c(equation_all, equation_nonpositive, equation_positive),
+  R_squared = c(r_squared_all, r_squared_nonpositive, r_squared_positive),
+  p_value = c(p_value_all, p_value_nonpositive, p_value_positive)
+)
+
+# Print regression results
+print(regression_results)
+
+# Function to create plots with regression info and label
+plot_with_regression_info <- function(data, label, equation, r_squared, p_value, axis_position = "left") {
+  lm_model <- lm(first_b ~ first_b_tm, data = data)
+  
+  # Calculate means for annotations
+  lm_results_mean <- data %>%
+    summarize(
+      tm_slope_mean = mean(first_b_tm),
+      Rs_slope_mean = mean(first_b),
+      Rs_slope_se_mean = mean(first_b_se),
+      Year_mean = mean(n)
+    )
+  
+  plot <- ggplot(data, aes(x = first_b_tm, y = first_b)) +
+    geom_point(aes(size = n), alpha = 0.75, color = "gray") +
+    labs(x = expression(Slope~of~air~temperature~(degree~C~year^-1)), y = "") +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1) +
+    geom_pointrange(aes(ymin = first_b - 2 * first_b_se, ymax = first_b + 2 * first_b_se), color = "gray") +
+    geom_smooth(method = "lm", se = TRUE, color = "blue", fill = "skyblue") +
+    guides(size = guide_legend("Year (n)")) +
+    geom_point(data = lm_results_mean, aes(x = tm_slope_mean, y = Rs_slope_mean), color = "black", size = 3.5) +
+    geom_segment(data = lm_results_mean, aes(x = tm_slope_mean, y = Rs_slope_mean - 2 * Rs_slope_se_mean, 
+                                             xend = tm_slope_mean, yend = Rs_slope_mean + 2 * Rs_slope_se_mean), 
+                 color = "black", size = 1) +
+    annotate("text", x = Inf, y = Inf, label = label, hjust = 1.5, vjust = 1.5, size = 6, fontface = "bold") +
+    annotate("text", x = -Inf, y = Inf, label = equation, hjust = -0.1, vjust = 1.5, size = 3.5) +
+    annotate("text", x = -Inf, y = Inf, label = paste0("R² = ", round(r_squared, 2)), hjust = -0.1, vjust = 3, size = 3.5) +
+    annotate("text", x = -Inf, y = Inf, label = paste0("p = ", format.pval(p_value, digits = 3)), hjust = -0.1, vjust = 4.5, size = 3.5) +
+    theme_minimal() +
+    theme(legend.position = "none")
+  
+  if (axis_position == "right") {
+    plot <- plot +
+      theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+      scale_y_continuous(sec.axis = dup_axis(name = " ")) +
+      theme(
+        axis.text.y.right = element_blank(),
+        axis.ticks.y.right = element_blank(),
+        axis.title.y.right = element_blank()
+      )
+  } else {
+    plot <- plot +
+      theme(panel.border = element_rect(colour = "black", fill = NA, size = 1)) +
+      scale_y_continuous(name = expression(Slope~of~soil~respiration~(g~C~m^-2~year^-1))) +
+      theme(
+        axis.text.y.left = element_text(color = "black"),
+        axis.ticks.y.left = element_line(color = "black"),
+        axis.title.y.left = element_text(color = "black")
+      )
+  }
+  
+  return(plot)
+}
+
+# Generate plots with labels and regression info
+plots <- list(
+  plot_with_regression_info(T_nonpositive, label = "b", equation = equation_nonpositive, r_squared = r_squared_nonpositive, p_value = p_value_nonpositive, axis_position = "left"),
+  plot_with_regression_info(T_positive, label = "c", equation = equation_positive, r_squared = r_squared_positive, p_value = p_value_positive, axis_position = "right"),
+  plot_with_regression_info(T_all, label = "a", equation = equation_all, r_squared = r_squared_all, p_value = p_value_all, axis_position = "left")
+)
+
+# Combine plots into a single layout
+plot_Fig2 <- (plots[[3]] / (plots[[1]] + plots[[2]])) +
+  plot_layout(heights = c(3.5, 2.5))
+
+# Display the final combined plot
+print(plot_Fig2)
+#save_agu_plot("plot_Fig2.png", width = 10, height = 6)
+
+```
+
+```{r}
+library(tiff)
+
+# 创建气温序列
+AT = seq(-10, 35, by=0.5)
+
+# FKT_S1 model
+AT.S1.FKT <- 1.523268*exp(0.034847 * AT)
+
+# 绘图
+plot_S3 <- plot(AT.S1.FKT ~ AT, type = "l", col = "skyblue", lwd = 2, lty=1,
+     xlim=c(-10,32), ylim = c(0,6),
+     xlab = "Air temperature (°C)",
+     ylab = "Soil respiration (g C m^-2 day^-1)")
+
+# 添加图例
+legend(x = "topright", legend=c("1st EXP (Annual Rs)"),
+       col=c("skyblue"),
+       lwd=2, lty=1, bty = "n", cex = 1.5)
+  
+# 将Trend_RESULT列从LM_RESULT合并到lm_results
+lm_results <- lm_results %>%
+  left_join(LM_RESULT %>% select(ID, Trend_RESULT), by = "ID")
+
+# 设置颜色：显著上升趋势为#EF797E，其他趋势为灰色
+colors <- c("1 Decrease but not Significant" = "gray",
+            "2 Significant Decrease" = "gray",
+            "3 Increase but not Significant" = "gray",
+            "4 Significant Increase" = "#EF797E")
+
+# 绘制每个站点的数据
+for(i in 1:nrow(longterm)) {
+  # 获取站点ID
+  site_id <- longterm$ID[i]
+  
+  # 根据站点ID查找趋势结果
+  trend_result <- lm_results %>% 
+    filter(ID == site_id) %>% 
+    pull(Trend_RESULT) %>% 
+    unique()
+  
+  # 如果没有趋势结果，跳过这个站点
+  if (length(trend_result) == 0) {
+    next
+  }
+  
+  # 确定颜色
+  color <- ifelse(trend_result == "4 Significant Increase", "#EF797E", "gray")
+  
+  # 获取该站点的年平均温度和土壤呼吸通量
+  tm_values <- longterm_Tm[i, 8:(7 + count_years)]
+  sr_values <- longterm[i, 8:(7 + count_years)] / 365
+  
+  # 跳过NA值
+  valid_indices <- !is.na(tm_values) & !is.na(sr_values)
+  tm_values <- tm_values[valid_indices]
+  sr_values <- sr_values[valid_indices]
+  
+  # 绘制点和线，使用确定的颜色
+  if (length(tm_values) > 0) {
+    points(tm_values, sr_values, col = color, pch = 16)
+    if (length(tm_values) > 1) {
+      lines(tm_values, sr_values, col = color, lwd = 2)
+    }
+  }
+}
+```
+
+
+## plot Rs time series linear model results
+
+## Possible reason 1 - need long time (\~100 years) to observe a significant trend
+
+There are measure variations during soil respiration measuring activities, and the variabilitty could generally seperated into two types: measure variability from interannual variability and from instantaneous variability.
+
+### What's the SRDB interannual variability?
+
+```{r srdb, echo=FALSE}
+srdb_v5$Rs_interann_cv <- with(srdb_v5, Rs_interann_err / Rs_annual)
+median_interann_cv <- median(srdb_v5$Rs_interann_cv, na.rm = TRUE) #计算数据框（srdb_v5）中列（Rs_interann_cv）的中位数（median），并且忽略其中的缺失值（na.rm = TRUE）
+
+srdb_v5 %>% 
+  filter(!is.na(Rs_interann_cv)) -> srdb_v5_sub      #得到每年之间的变异系数 CV
+
+srdb_v5 %>% 
+  filter(!is.na(Rs_interann_cv)) %>% 
+  ggplot(aes(x = Rs_interann_cv)) + 
+  geom_histogram(bins = 30, fill = 'gray', col = "black") +
+  scale_x_continuous(labels = scales::percent, limits = c(0, 1)) +
+  geom_vline(xintercept = median_interann_cv, color = "red") +         #xintercept = median_interann_cv 参数设置垂直线的 x 坐标为中位数的值
+  ylab("Count") + 
+  xlab("CV between successive years") ->
+  plot_annual_cv
+
+plot_annual_cv
+  
+#save_agu_plot("srdb_cv.png")
+
+```
+
+OK, so the median measurement error here is \~`r round(median_interann_cv * 100, 0)`% for `r nrow(srdb_v5_sub)` observations of fluxes between `r round(min(srdb_v5_sub$Rs_annual, na.rm = T))` and `r round(max(srdb_v5_sub$Rs_annual, na.rm = T))` g C/m2/year.
+
+### What's the CV within COSORE variability?
+
+```{r cv12, echo = FALSE}
+cosore_all %>% 
+  mutate(ID_day = paste0(dset, "-", CSR_PORT, "-", year(CSR_TIMESTAMP_END),"-",
+                         month(CSR_TIMESTAMP_END), "-", day(CSR_TIMESTAMP_END))) %>% 
+  group_by(ID_day) %>%
+  summarise(n = n(), meanFlux = mean(CSR_FLUX_CO2),
+            cv = sd(CSR_FLUX_CO2) / mean(CSR_FLUX_CO2)) %>% 
+  filter(n > 2) ->
+  meas_error_1
+median_error <- median(meas_error_1$cv)
+
+ggplot(meas_error_1, aes(x = cv)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  scale_x_continuous(labels = scales::percent, limits = c(-0.1, 1)) +
+  geom_vline(xintercept = median_error, color = "red") +
+  ylab("Count") + 
+  xlab("CV between successive IRGA measurements") -> plot_IRGA_cv
+
+plot_IRGA_cv
+#save_agu_plot("licor12_cv.png")           #IRGA 测量之间的变异系数
+```
+
+OK, so the median measurement error here is \~`r round(median_error * 100, 0)`% for `r nrow(meas_error_1)` observations of fluxes between `r round(min(meas_error_1$meanFlux), 2)` and `r round(max(meas_error_1$meanFlux), 2)` µmol/m2/s.
+
+## What if the meaure error was added to the soil respiration trend?
+##nc 对象的 dim 列表中已经清晰地标明了 lon 和 lat 分别是经度和纬度维度。lev 可能表示层次（例如海拔或深度）而 time 表示时间维度。在 var 列表中，你可以看到 co2 变量的维度使用了 lon、lat、lev 和 time，其中维度大小为 720x360x1x112，这意味着每个时间步有一个 720x360 的二维数据网格，而且只有一个层次（因为 lev 的长度为1）。
+```{r hashimoto, echo=FALSE}
+ #Downloaded August 25, 2017 from http://cse.ffpri.affrc.go.jp/shojih/data/index.html
+
+ncfiles_RH <- c("data/extdata/RH_yr_Hashimoto2015.nc")
+nc_RH <- nc_open("data/extdata/RH_yr_Hashimoto2015.nc")  # change to [1]
+co2_RH <- ncvar_get(nc_RH, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))        
+lon_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lon$name)
+lat_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lat$name)  
+nc_close(nc_RH)     #关闭文件
+
+ncfiles_Rs <- c("data/extdata/RS_yr_Hashimoto2015.nc")
+nc_RS <- nc_open("data/extdata/RS_yr_Hashimoto2015.nc")  # change to [1]
+co2_RS <- ncvar_get(nc_RS, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))        
+lon_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lon$name)
+lat_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lat$name)  
+nc_close(nc_RS)
+
+lattice::levelplot(co2_RH[,,1])   #将第一个时间步的土壤异养呼吸数据绘制成二维图
+co2_fuzz_RH <- fuzz(co2_RH, error = median_error)
+
+lattice::levelplot(co2_RS[,,1])   #将第一个时间步的土壤异养呼吸数据绘制成二维图
+co2_fuzz_RS <- fuzz(co2_RS, error = median_error)
+
+do_fitting <- function(data, lon, lat, start_year = 1901) {
+  nyears <- dim(data)[3]
+  results <- list()
+  for (i in seq_along(lon)) {
+    for (j in seq_along(lat)) {
+      ts_data <- data[i, j, ]
+      # 跳过全是NA的数据点
+      if (all(is.na(ts_data))) next 
+      # 初始化变量
+      final_slope <- NA
+      final_signif <- NA
+      final_year_index <- NA 
+      for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, data = ts_data[1:n]) %>% drop_na() # 使用年份索引
+        
+        if (nrow(df) > 1) {
+          lm_fit <- lm(data ~ year_index, data = df)
+          current_slope <- coef(lm_fit)["year_index"]
+          current_signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+          # 在循环的每次迭代中更新这些值
+          final_slope <- current_slope
+          final_signif <- current_signif
+          # 如果找到显著性小于0.05
+          if (!is.na(current_signif) && current_signif < 0.05) {
+            final_year_index <- n  # 记录找到显著性时的年份索引
+            break  # 找到显著性后停止
+          }
+        }
+      }
+      # 添加结果到列表，无论是否找到显著性小于0.05
+      results <- c(results, list(list(
+        lon = lon[i], 
+        lat = lat[j], 
+        slope = final_slope, 
+        signif = final_signif, 
+        analyzed_until = ifelse(!is.na(final_year_index), n, NA)
+      )))
+    }
+  }
+  # 转换结果列表为tibble
+  results_df <- bind_rows(results)
+  return(results_df)
+}
+
+```
+
+## Time series analysis for each cell
+Jian:take ~2 hours, updated to drake
+
+```{r drake co2}
+#使用 fuzz 函数给CO2数据添加中值误差。将结果存储在名为 co2_fuzz 的变量中。
+#使用 do_fitting 函数对添加了误差后的CO2数据 co2_fuzz 进行拟合分析，将结果存储在 out_fuzz 中。
+#函数do_fitting 用于进行时间序列拟合分析。函数内部，定义了一个嵌套函数f，用于对给定的时间序列进行线性拟合。将输入的CO2数据切分成网格单元，并将 f 函数应用于每个网格单元的时间序列数据。f 函数使用线性回归（最小二乘法）对每个时间序列进行拟合，得到一个线性模型。然后，do_fitting 函数将所有拟合的模型存储在一个列表中，并返回该列表作为拟合结果。通过拟合分析，可以得到每个网格单元时间序列的斜率值。斜率表示CO2浓度随时间的变化趋势。do_fitting 函数还计算了斜率的p值，用于判断斜率是否显著不是零
+
+#plan = drake_plan(
+   # out_RH = do_fitting(co2_RH, lon_RH, lat_RH),  
+   # out_fuzz_RH = do_fitting(co2_fuzz_RH, lon_RH, lat_RH),
+   # out_RS = do_fitting(co2_RS, lon_RS, lat_RS),  
+   # out_fuzz_RS = do_fitting(co2_fuzz_RS, lon_RS, lat_RS))
+#make(plan)
+#drake::drake_cache("D:/git/Github/Longterm/.drake")$unlock()
+```
+
+
+
+## plot the results
+```{r}
+out_RH <- drake::readd(out_RH)
+summary(as.vector(out_RH$slope))
+# 调整经度值
+#out_corrected <- out %>% mutate(lon_corrected = ifelse(lon > 180, lon - 360, lon))   在console里执行！！
+out_RH$lon <- ifelse(out_RH$lon > 180, out_RH$lon - 360, out_RH$lon)
+
+# 应用过滤和分组
+out_filtered_RH <- out_RH %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+#--------------------------------------------------------------------------------------------------------
+out_RS <- drake::readd(out_RS)
+summary(as.vector(out_RS$slope))
+# 调整经度值
+#out_corrected <- out %>% mutate(lon_corrected = ifelse(lon > 180, lon - 360, lon))   在console里执行！！
+out_RS$lon <- ifelse(out_RS$lon > 180, out_RS$lon - 360, out_RS$lon)
+
+# 应用过滤和分组
+out_filtered_RS <- out_RS %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+```
+
+```{r}
+#计算占比
+group_propotion_RH <- out_filtered_RH %>%
+  group_by(Group) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+print(group_propotion_RH)
+
+plot_group_propotion_RH <- ggplot(data = group_propotion_RH) +
+  geom_bar(aes(x = 3, y = Percentage, fill = Group), stat = "identity", 
+           width = 1.6,  # 环的宽度
+           color = "white",  # 条形间的分隔颜色
+           size = 0.2) +
+ coord_polar("y", 0)+
+  theme_void() +  # 去除所有预设主题元素
+  xlim(0.5, 4) + 
+  labs(x = "Ecosystem Type", y = "") +
+  scale_fill_manual(values = c(
+   "DEC_SIG"  = "#5989A5",
+     "DEC_INSIG" = "gray",
+     "INC_INSIG" = "#FDCCA5",
+      "INC_SIG" = "#EF797E"
+  ))+
+   geom_text(aes(x = 3, y = Percentage / 2 + c(0, cumsum(Percentage)[-length(Percentage)]), ), 
+                 label = c("0.9%", "46.4%", "3.8%", "49%"), color = "black", size = 2)+  
+  theme(legend.position = "none") 
+print(plot_group_propotion_RH)
+ 
+pie_grob_RH <- ggplotGrob(plot_group_propotion_RH)
+
+plot_4group_distribution_RH <- ggplot(out_filtered_RH, aes(x = lon, y = lat, color = Group)) +
+  geom_point(size = 0.25, shape = 15) +
+  scale_color_manual(values = c(
+ "INC_SIG" = "#EF797E",
+     "DEC_INSIG" = "gray",
+     "INC_INSIG" = "#FDCCA5",
+     "DEC_SIG" = "#5989A5"
+  ))+
+  labs(title = "a",
+       x = "Longitude",
+       y = "Latitude",
+       color = "Group") +
+    coord_fixed(ratio = 1) +
+ theme(
+   # 设置面板背景透明 panel.background = element_blank(), 
+    panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+    panel.border = element_rect(colour = "black"), # 添加边框
+    axis.text = element_text(color = "black"), # 保留坐标轴标签
+    axis.title = element_text(color = "black"), # 保留坐标轴标题
+    legend.position = "none" )+
+  ylim(-60, 90)  +
+  annotation_custom(grob = pie_grob_RH, xmin = -180, xmax = -110, ymin = -60, ymax = 0) 
+world_continents <- ne_countries(scale = "medium", returnclass = "sf")
+
+ plot_4group_distribution_RH <- plot_4group_distribution_RH +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+ 
+# 打印图表
+print(plot_4group_distribution_RH)
+#save_agu_plot("plot_4group_distribution_RH.png") 
+
+
+#--------------------------------------------------------------------------------------------------
+#计算占比
+group_propotion_RS <- out_filtered_RS %>%
+  group_by(Group) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+print(group_propotion_RS)
+
+plot_group_propotion_RS <- ggplot(data = group_propotion_RS) +
+  geom_bar(aes(x = 3, y = Percentage, fill = Group), stat = "identity", 
+           width = 1.6,  # 环的宽度
+           color = "white",  # 条形间的分隔颜色
+           size = 0.2) +  # 分隔宽度
+  coord_polar("y", start = 0) +  # 使用极坐标系，设定起始角度
+  theme_void() +  # 去除所有预设主题元素
+  xlim(0.5, 3.8) + 
+  labs(x = "Ecosystem Type", y = "") +
+  scale_fill_manual(values = c(
+   "INC_SIG" = "#EF797E",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+     "DEC_SIG" = "#5989A5"
+  ))+
+  theme(legend.position = "none")+
+   geom_text(aes(x = 3, y = Percentage / 2 + c(0, cumsum(Percentage)[-length(Percentage)]), 
+    label = c("0.9%", "46.5%", "3.7%", "48.9%")), color = "black", size = 2)  
+print(plot_group_propotion_RS)
+ 
+pie_grob_RS <- ggplotGrob(plot_group_propotion_RS)
+
+plot_4group_distribution_RS <- ggplot(out_filtered_RS, aes(x = lon, y = lat, color = Group)) +
+  geom_point(size = 0.25, shape = 15) +
+  scale_color_manual(values = c(
+    "INC_SIG" = "#EF797E",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+    "DEC_SIG" = "#5989A5"
+  )) +
+  labs(title = "a",
+       x = "Longitude",
+       y = "Latitude",
+       color = "Group") +
+    coord_fixed(ratio = 1) +
+ theme(
+   # 设置面板背景透明 panel.background = element_blank(), 
+    panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+    panel.border = element_rect(colour = "black"), # 添加边框
+    axis.text = element_text(color = "black"), # 保留坐标轴标签
+    axis.title = element_text(color = "black"), # 保留坐标轴标题
+    legend.position = "none" )+
+  ylim(-60, 90)  +
+  annotation_custom(grob = pie_grob_RS, xmin = -180, xmax = -110, ymin = -60, ymax = 0) 
+world_continents <- ne_countries(scale = "medium", returnclass = "sf")
+
+ plot_4group_distribution_RS <- plot_4group_distribution_RS +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+ 
+# 打印图表
+print(plot_4group_distribution_RS)
+#save_agu_plot("plot_4group_distribution_RS.png") 
+```
+
+```{r}
+# 重采样直方图
+boots_mean <- function(data, size) {
+  sample_data <- sample(data[!is.na(data)], size, replace = TRUE)
+  mean_value <- mean(sample_data)
+  return(mean_value)
+}
+
+#测到显著的年份直方图
+inc_sig_data_RH <- out_filtered_RH %>%
+  filter(slope > 0) %>%
+  mutate(inc_sig_year = sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA))
+
+# 计算平均值
+mean_inc_sig_data_RH <- mean(inc_sig_data_RH$inc_sig_year, na.rm = TRUE)
+
+ggplot(inc_sig_data_RH, aes(x = inc_sig_year)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = mean_inc_sig_data_RH, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("First Year of Significance (Slope > 0)_Rh") + 
+  ggtitle("Histogram of First Year of Significance (Error = 0 )") -> plot_Positive_first_change_hist_RH
+
+# 打印直方图
+print(plot_Positive_first_change_hist_RH)
+#save_agu_plot("测到显著年份32.85364年_RH.png", height=5, width=7)
+
+# 执行 1000 次重采样并计算均值
+means_RH <- replicate(1000, boots_mean(inc_sig_data_RH$inc_sig_year, 50))
+means_df_RH <- data.frame(Mean = means_RH)# 转换为数据框架，以便使用 ggplot
+Mean_mean_RH <- mean(means_df_RH$Mean, na.rm = TRUE)# 计算重采样均值的平均数
+
+# 绘制重采样均值的直方图，并添加平均数的垂直线
+ggplot(means_df_RH, aes(x = Mean)) +
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = Mean_mean_RH, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("Bootstrap Mean of First Year of Significance_Rh") + 
+  ggtitle("Histogram of Bootstrap Means of First Year of Significance (Error = 0 )") -> plot_bootstrap_hist_RH
+#save_agu_plot("meanBOOTSTRAP32.87262y_RH.png")
+
+PFC_RH <- ggplot(data = inc_sig_data_RH) +
+  geom_tile(aes(x = lon, y = lat, fill = analyzed_until)) +
+ scale_fill_gradient(low = "#b4e5f7", high = "#422a7e", 
+                      name = "Year of Analysis", 
+                      na.value = "grey50",
+                       limits = c(min(inc_sig_data_RH$analyzed_until, na.rm = TRUE), max(inc_sig_data_RH$analyzed_until, na.rm = TRUE))) + 
+   labs(title = "b", 
+        x = "Longitude", y = "Latitude") +
+   coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+ theme(legend.position = "none",
+            panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)+  
+  ylim(-60, 90) 
+print(PFC_RH)
+#save_agu_plot("PFC_RH.png")
+
+
+#分组显示分布
+breaks <- c(4, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 112)
+labels <- c("4~20", "20~30", "30~40", "40~50", "50~60", "60~70", "70~80", "80~90", "90~100", "100~110", "110~112")
+inc_sig_data_RH$Group <- cut(inc_sig_data_RH$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)
+colors <- c("#f0fe35", "#a3d393", "#70c17f",  "#f7afb9", "#f172ad", "#be86ba", "#8b66b8" , "#c63596" , "#51c4c2", "#4068b2", "#4583b3")
+
+filtered_inc_sig_data_RH <- inc_sig_data_RH %>%
+  filter(!is.na(Group))
+
+G_PFC_RH <- ggplot(data = filtered_inc_sig_data_RH) + 
+  geom_tile(aes(x = lon, y = lat, fill = Group)) + 
+  scale_fill_manual(values = colors, labels = labels, guide = guide_legend(title = "First Year of Significance")) +
+  labs(title = "b", x = "Longitude", y = "Latitude") +
+  coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+  theme(legend.position = "none",
+            panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank() # 移除次要网格线
+    )+  
+  ylim(-60, 90) 
+
+print(G_PFC_RH)
+#save_agu_plot("G_PFC_RH.png")
+
+breaks_counts_RH <- filtered_inc_sig_data_RH %>%
+  group_by(Group) %>%
+  summarise(Count = n())
+total_count_RH <- sum(breaks_counts_RH$Count)
+breaks_counts_RH <-breaks_counts_RH %>%
+  mutate(Percentage = (Count / total_count_RH) * 100)
+print(breaks_counts_RH)
+
+#-------------------------------------------------------------------------------------------------------------------------------------------------
+#测到显著的年份直方图
+inc_sig_data_RS <- out_filtered_RS %>%
+  filter(slope > 0) %>%
+  mutate(inc_sig_year = sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA))
+
+# 计算平均值
+mean_inc_sig_data_RS <- mean(inc_sig_data_RS$inc_sig_year, na.rm = TRUE)
+
+ggplot(inc_sig_data_RS, aes(x = inc_sig_year)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = mean_inc_sig_data_RS, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("First Year of Significance (Slope > 0)_Rs") + 
+  ggtitle("Histogram of First Year of Significance (Error = 0 )") -> plot_Positive_first_change_hist_RS
+# 打印直方图
+print(plot_Positive_first_change_hist_RS)
+#save_agu_plot("测到显著年份32.85364年_RS.png", height=5, width=7)
+
+# 执行 1000 次重采样并计算均值
+means_RS <- replicate(1000, boots_mean(inc_sig_data_RS$inc_sig_year, 50))
+means_df_RS <- data.frame(Mean = means_RS)# 转换为数据框架，以便使用 ggplot
+Mean_mean_RS <- mean(means_df_RS$Mean, na.rm = TRUE)# 计算重采样均值的平均数
+
+# 绘制重采样均值的直方图，并添加平均数的垂直线
+ggplot(means_df_RS, aes(x = Mean)) +
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = Mean_mean_RS, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("Bootstrap Mean of First Year of Significance_Rs") + 
+  ggtitle("Histogram of Bootstrap Means of First Year of Significance (Error = 0 )")-> plot_bootstrap_hist_RS
+#save_agu_plot("meanBOOTSTRAP32.87262y_RS.png")
+
+PFC_RS <- ggplot(data = inc_sig_data_RS) +
+  geom_tile(aes(x = lon, y = lat, fill = analyzed_until)) +
+ scale_fill_gradient(low = "#b4e5f7", high = "#422a7e", 
+                      name = "Year of Analysis", 
+                      na.value = "grey50",
+                       limits = c(min(inc_sig_data_RS$analyzed_until, na.rm = TRUE), max(inc_sig_data_RS$analyzed_until, na.rm = TRUE))) + 
+   labs(title = "a", 
+        x = "Longitude", y = "Latitude") +
+   coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+  theme(legend.position = "none",
+            panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)+  
+  ylim(-60, 90) 
+print(PFC_RS)
+#save_agu_plot("PFC_RS.png")
+
+
+breaks <- c(4, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 112)
+labels <- c("4~20", "20~30", "30~40", "40~50", "50~60", "60~70", "70~80", "80~90", "90~100", "100~110", "110~112")
+inc_sig_data_RS$Group <- cut(inc_sig_data_RS$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)
+colors <- c("#f0fe35", "#a3d393", "#70c17f",  "#f7afb9", "#f172ad", "#be86ba", "#8b66b8" , "#c63596" , "#51c4c2", "#4068b2", "#4583b3")
+
+filtered_inc_sig_data_RS <- inc_sig_data_RS %>%
+  filter(!is.na(Group))
+
+G_PFC_RS <- ggplot(data = filtered_inc_sig_data_RS) + 
+  geom_tile(aes(x = lon, y = lat, fill = Group)) + 
+  scale_fill_manual(values = colors, labels = labels, guide = guide_legend(title = "First Year of Significance")) +
+  labs(title = "b", x = "Longitude", y = "Latitude") +
+  coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+  theme(legend.position = "none",    
+        panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank())+ # 移除次要网格线) 
+  ylim(-60, 90) 
+
+print(G_PFC_RS)
+#save_agu_plot("G_PFC_RS.png")
+
+breaks_counts_RS <- filtered_inc_sig_data_RS %>%
+  group_by(Group) %>%
+  summarise(Count = n())
+total_count_RS <- sum(breaks_counts_RS$Count)
+breaks_counts_RS <-breaks_counts_RS %>%
+  mutate(Percentage = (Count / total_count_RS) * 100)
+print(breaks_counts_RS)
+```
+
+
+```{r}
+# plot histgram  绘制p值的直方图，分析时间序列趋势的显著性
+tibble(signif = as.vector(unlist(out_RH$signif))) %>% 
+  na.omit() %>% 
+  ggplot(aes(x = signif)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = 0.05, color = "red") +
+  ylab("Count") + 
+  xlab("p value of time series trend") ->
+  plot_signif_RH
+
+plot_signif_RH
+#save_agu_plot("signif_before_RH.png")
+
+#---------------------------------------------------------------
+# plot histgram  绘制p值的直方图，分析时间序列趋势的显著性
+tibble(signif = as.vector(unlist(out_RS$signif))) %>% 
+  na.omit() %>% 
+  ggplot(aes(x = signif)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = 0.05, color = "red") +
+  ylab("Count") + 
+  xlab("p value of time series trend") ->
+  plot_signif_RS
+
+plot_signif_RS
+#save_agu_plot("signif_before_RS.png")
+```
+Jian: using inline code rather than text！！！ <br>
+Total cells = `r total`. <br>
+slopes < 0 & signif > 0.05:  16.0978 %  <br>
+Cells with positive slope = `r count1` or `r round(count1 / total * 100, 4)`%. <br>
+
+slopes < 0 & signif < 0.05:  13.80943 % <br>
+Cells with *significant* positive slope = `r count2` or `r round(count2 / total * 100, 4)`%. <br>
+
+slopes > 0 & signif > 0.05:  27.96036 % <br>
+Area with positive slope = `r count3` or `r round(count3 / total * 100, 4)`%. <br>
+
+slopes > 0 & signif < 0.05:  42.13241 % <br>
+Area with *significant* positive slope = `r count4` or `r round(count4 / total * 100, 4)`%.  <br>    
+
+
+## Re-do analysis with assumed error rate
+```{r fuzz, echo=FALSE}
+out_fuzz_RH <- drake::readd(out_fuzz_RH)
+out_fuzz_RH$lon <- ifelse(out_fuzz_RH$lon > 180, out_fuzz_RH$lon - 360, out_fuzz_RH$lon)
+
+# 转换成数据框格式
+out_fuzz_df_RH <- as.data.frame(out_fuzz_RH)
+
+# 进行过滤和分组操作
+out_fuzz_filtered_RH <- out_fuzz_df_RH %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+# 计算占比
+group_fuzz_propotion_RH <- out_fuzz_filtered_RH %>%
+  group_by(Group) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+print(group_fuzz_propotion_RH)
+
+
+plot_group_fuzz_propotion_RH <- ggplot(data = group_fuzz_propotion_RH ) +
+  geom_bar(aes(x = 3, y = Percentage, fill = Group), stat = "identity", 
+           width = 1.6,  # 环的宽度
+           color = "white",  # 条形间的分隔颜色
+           size = 0.2) +  # 分隔宽度
+  coord_polar("y", start = 0) +  # 使用极坐标系，设定起始角度
+  theme_void() +  # 去除所有预设主题元素
+  xlim(0.5, 3.8) + 
+  labs(x = "", y = "") +
+
+  scale_fill_manual(values = c(
+    "DEC_SIG" = "#5989A5",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+    "INC_SIG" = "#EF797E"
+  ))+
+  geom_text(aes(x = 3, y = Percentage / 9 + c(0, cumsum(Percentage)[-length(Percentage)]), 
+                label = c("10.9%", "33.1%", "19.4%", "36.6%")), color = "black", size = 2) +
+  theme(legend.position = "none") 
+    print(plot_group_fuzz_propotion_RH)
+ 
+pie_fuzz_grob_RH <- ggplotGrob(plot_group_fuzz_propotion_RH)
+plot_fuzz_4group_distribution_RH <- ggplot(out_fuzz_filtered_RH, aes(x = lon, y = lat, color = Group)) +
+  geom_point(size = 0.25, shape = 15) +
+  scale_color_manual(values = c(
+    "DEC_SIG" = "#5989A5",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+    "INC_SIG" = "#EF797E"
+  )) +
+ labs(title = "c",
+       x = "Longitude",
+       y = "Latitude",
+       color = "Group") +
+    coord_fixed(ratio = 1) +
+ theme(
+   # 设置面板背景透明 panel.background = element_blank(), 
+    panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+    panel.border = element_rect(colour = "black"), # 添加边框
+    axis.text = element_text(color = "black"), # 保留坐标轴标签
+    axis.title = element_text(color = "black"), # 保留坐标轴标题
+    legend.position = "none" )+
+  ylim(-60, 90)  +
+  annotation_custom(grob = pie_fuzz_grob_RH, xmin = -180, xmax = -110, ymin = -60, ymax = 0) 
+
+world_continents <- ne_countries(scale = "medium", returnclass = "sf")
+plot_fuzz_4group_distribution_RH <- plot_fuzz_4group_distribution_RH +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+
+# 打印图表
+print(plot_fuzz_4group_distribution_RH)
+#save_agu_plot("plot_fuzz_4group_distribution_RH.png") 
+
+# plot histgram after cv added
+tibble(signif = as.vector(unlist(out_fuzz_RH$signif))) %>% 
+  na.omit() %>% 
+  ggplot(aes(x = signif)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+   geom_vline(xintercept = 0.05, color = "red") +
+  ylab("Count") + 
+  xlab("p value of time series trend") ->
+  plot_signif_after_RH
+plot_signif_after_RH
+#save_agu_plot("plot_signif_after_RH.png")
+#--------------------------------------------------------------------------------------------------------------------
+out_fuzz_RS <- drake::readd(out_fuzz_RS)
+out_fuzz_RS$lon <- ifelse(out_fuzz_RS$lon > 180, out_fuzz_RS$lon - 360, out_fuzz_RS$lon)
+
+# 转换成数据框格式
+out_fuzz_df_RS <- as.data.frame(out_fuzz_RS)
+
+# 进行过滤和分组操作
+out_fuzz_filtered_RS <- out_fuzz_df_RS %>%
+  filter(!is.na(slope), !is.na(signif)) %>%
+  mutate(
+    Group = case_when(
+      slope < 0 & signif < 0.05 ~ "DEC_SIG",
+      slope < 0 & signif >= 0.05 ~ "DEC_INSIG",
+      slope > 0 & signif >= 0.05 ~ "INC_INSIG",
+      slope > 0 & signif < 0.05 ~ "INC_SIG"))
+# 计算占比
+group_fuzz_propotion_RS <- out_fuzz_filtered_RS %>%
+  group_by(Group) %>%
+  summarise(Count = n()) %>%
+  mutate(Percentage = Count / sum(Count) * 100)
+print(group_fuzz_propotion_RS)
+
+plot_group_fuzz_propotion_RS <- ggplot(data = group_fuzz_propotion_RS ) +
+  geom_bar(aes(x = 3, y = Percentage, fill = Group), stat = "identity", 
+           width = 1.6,  # 环的宽度
+           color = "white",  # 条形间的分隔颜色
+           size = 0.2) +  # 分隔宽度
+  coord_polar("y", start = 0) +  # 使用极坐标系，设定起始角度
+  theme_void() +  # 去除所有预设主题元素
+  xlim(0.5, 3.8) + 
+  labs(x = "", y = "") +
+  scale_fill_manual(values = c(
+    "DEC_SIG" = "#5989A5",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+    "INC_SIG" = "#EF797E"
+  ))+
+  geom_text(aes(x = 3, y = Percentage / 9 + c(0, cumsum(Percentage)[-length(Percentage)]), 
+                label = c("9.1%", "35.1%", "18.3%", "37.5%")), color = "black", size = 2) +
+   theme(legend.position = "none")  
+print(plot_group_fuzz_propotion_RS)
+ 
+pie_fuzz_grob_RS <- ggplotGrob(plot_group_fuzz_propotion_RS)
+plot_fuzz_4group_distribution_RS <- ggplot(out_fuzz_filtered_RS, aes(x = lon, y = lat, color = Group)) +
+  geom_point(size = 0.25, shape = 15) +
+  scale_color_manual(values = c(
+    "DEC_SIG" = "#5989A5",
+    "DEC_INSIG" = "gray",
+    "INC_INSIG" = "#FDCCA5",
+    "INC_SIG" = "#EF797E"
+  )) +
+ labs(title = "c",
+       x = "Longitude",
+       y = "Latitude",
+       color = "Group") +
+    coord_fixed(ratio = 1) +
+ theme(
+   # 设置面板背景透明 panel.background = element_blank(), 
+    panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+    panel.border = element_rect(colour = "black"), # 添加边框
+    axis.text = element_text(color = "black"), # 保留坐标轴标签
+    axis.title = element_text(color = "black"), # 保留坐标轴标题
+    legend.position = "none" )+
+  ylim(-60, 90)  +
+  annotation_custom(grob = pie_fuzz_grob_RS, xmin = -180, xmax = -110, ymin = -60, ymax = 0) 
+
+world_continents <- ne_countries(scale = "medium", returnclass = "sf")
+plot_fuzz_4group_distribution_RS <- plot_fuzz_4group_distribution_RS +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+
+# 打印图表
+print(plot_fuzz_4group_distribution_RS)
+#save_agu_plot("plot_fuzz_4group_distribution_RS.png") 
+
+# plot histgram after cv added
+tibble(signif = as.vector(unlist(out_fuzz_RS$signif))) %>% 
+  na.omit() %>% 
+  ggplot(aes(x = signif)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+   geom_vline(xintercept = 0.05, color = "red") +
+  ylab("Count") + 
+  xlab("p value of time series trend") ->
+  plot_signif_after_RS
+plot_signif_after_RS
+#save_agu_plot("plot_signif_after_RS.png")
+
+
+
+combined_FIG4_A <-   plot_4group_distribution_RH + plot_fuzz_4group_distribution_RH +
+   plot_layout(guides = 'collect')&
+  guides(color = guide_legend(override.aes = list(size = 5))) &  # 收集并合并图例
+   theme(legend.position = "bottom", legend.direction = "horizontal" , 
+             legend.title = element_blank())  # 移除图例标题
+  print(combined_FIG4_A)
+
+```
+
+```{r}
+out_fuzz_filtered_RH$lon <- ifelse(out_fuzz_filtered_RH$lon > 180, out_fuzz_filtered_RH$lon - 360, out_fuzz_filtered_RH$lon)
+inc_sig_fuzz_data_RH <- out_fuzz_filtered_RH%>%
+  filter(slope > 0) %>%
+  mutate(inc_sig_year = sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA))
+
+fuzz_PFC_RH <- ggplot(data = inc_sig_fuzz_data_RH) +
+  geom_tile(aes(x = lon, y = lat, fill = analyzed_until)) +
+ scale_fill_gradient(low = "#b4e5f7", high = "#422a7e", 
+                      name = "Year of Analysis", 
+                      na.value = "grey50",
+                       limits = c(min(inc_sig_fuzz_data_RH$analyzed_until, na.rm = TRUE), max(inc_sig_fuzz_data_RH$analyzed_until, na.rm = TRUE))) + 
+   labs(title = "d", 
+        x = "Longitude", y = "Latitude") +
+theme(legend.position = "none",
+            panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)+    
+  ylim(-60, 90)+
+   coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+print(fuzz_PFC_RH)
+#-----------------------------------------------------------------------------------------------------------------------------------------------
+out_fuzz_filtered_RS$lon <- ifelse(out_fuzz_filtered_RS$lon > 180, out_fuzz_filtered_RS$lon - 360, out_fuzz_filtered_RS$lon)
+inc_sig_fuzz_data_RS <- out_fuzz_filtered_RS%>%
+  filter(slope > 0) %>%
+  mutate(inc_sig_year = sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA))
+
+fuzz_PFC_RS <- ggplot(data = inc_sig_fuzz_data_RS) +
+  geom_tile(aes(x = lon, y = lat, fill = analyzed_until)) +
+ scale_fill_gradient(low = "#b4e5f7", high = "#422a7e", 
+                      name = "Year of Analysis", 
+                      na.value = "grey50",
+                       limits = c(min(inc_sig_fuzz_data_RS$analyzed_until, na.rm = TRUE), max(inc_sig_fuzz_data_RS$analyzed_until, na.rm = TRUE))) + 
+   labs(title = "c", 
+        x = "Longitude", y = "Latitude") +
+theme(legend.position = "none",
+            panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)+  
+  ylim(-60, 90)+
+   coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")
+print(fuzz_PFC_RS)
+
+
+combined_PFC_fuzz_PFC <-   PFC_RS +PFC_RH +  fuzz_PFC_RS + fuzz_PFC_RH +   
+  plot_layout(guides = 'collect') &  # 收集并合并图例
+  theme(legend.position = "bottom", legend.direction = "horizontal")  
+print(combined_PFC_fuzz_PFC)
+#save_agu_plot("FigureS2.png", width = 8, height = 6)
+#--------------------------------------------------------------------------------------------------------------------------------------------
+
+# 将Group列中的INC_INSIG数据设置为112年，并加入到数据框中
+inc_sig_fuzz_data_RH <- out_fuzz_filtered_RH %>%
+  mutate(
+    inc_sig_year = ifelse(Group == "INC_INSIG", 112, sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA)),
+    analyzed_until = ifelse(Group == "INC_INSIG", 112, analyzed_until)    #analyzed_until中INC_INSIG数据都设置为112，是否需要？？？
+  ) %>%
+  filter(slope > 0 | Group == "INC_INSIG")
+
+# 计算新的均值，现在包括了设置为112年的INC_INSIG数据
+mean_inc_sig_fuzz_data_RH <- mean(inc_sig_fuzz_data_RH$inc_sig_year, na.rm = TRUE)
+
+# 使用 ggplot 绘制直方图
+ggplot(inc_sig_fuzz_data_RH, aes(x = inc_sig_year)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = mean_inc_sig_fuzz_data_RH, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("First Year of Significance (Slope > 0)_Rh") + 
+  ggtitle("Histogram of First Year of Significance (Error = 0.19)") -> plot_fuzz_Positive_first_change_hist_RH
+#save_agu_plot("测到显著上升61.14728_RH年.png", height=5, width=7)
+plot_fuzz_Positive_first_change_hist_RH
+
+# 执行 1000 次重采样来计算 inc_sig_year 的均值
+fuzz_means_RH <- data.frame(mean = numeric())
+for(i in 1:1000) {
+  fuzz_mean_i_RH <- boots_mean(inc_sig_fuzz_data_RH$inc_sig_year, 50)
+  fuzz_means_RH <- rbind(fuzz_means_RH, data.frame(mean = fuzz_mean_i_RH))
+}
+# 计算所有重采样均值的平均值
+fuzz_Mean_mean_RH <- mean(fuzz_means_RH$mean, na.rm = TRUE)
+
+# 绘制重采样均值的直方图，并添加一个垂直线表示均值的平均值
+ggplot(fuzz_means_RH, aes(x = mean)) +
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = fuzz_Mean_mean_RH, color = "red", size=1) +
+  ylab("Frequency") +
+  xlab("Bootstrap Mean of First Year of Significance_Rh") +
+  ggtitle("Histogram of Bootstrap Means of First Year of Significance (Error = 0.19)") -> plot_fuzz_bootstrap_hist_RH
+#save_agu_plot("fuzz_MEAN_BOOTSTRAP61.01816y_RH.png")
+#---------------------------------------------------------------------------------------------------------------------------------------
+
+# 将Group列中的INC_INSIG数据设置为112年，并加入到数据框中
+inc_sig_fuzz_data_RS <- out_fuzz_filtered_RS %>%
+  mutate(
+    inc_sig_year = ifelse(Group == "INC_INSIG", 112, sapply(analyzed_until, function(x) if(length(x) > 0) x[1] else NA)),
+    analyzed_until = ifelse(Group == "INC_INSIG", 112, analyzed_until)    #analyzed_until中INC_INSIG数据都设置为112，是否需要？？？
+  ) %>%
+  filter(slope > 0 | Group == "INC_INSIG")
+
+# 计算新的均值，现在包括了设置为112年的INC_INSIG数据
+mean_inc_sig_fuzz_data_RS <- mean(inc_sig_fuzz_data_RS$inc_sig_year, na.rm = TRUE)
+
+# 使用 ggplot 绘制直方图
+ggplot(inc_sig_fuzz_data_RS, aes(x = inc_sig_year)) + 
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = mean_inc_sig_fuzz_data_RS, color = "red", size=1) +
+  ylab("Frequency") + 
+  xlab("First Year of Significance (Slope > 0)_Rs") + 
+  ggtitle("Histogram of First Year of Significance (Error = 0.19)") -> plot_fuzz_Positive_first_change_hist_RS
+#save_agu_plot("测到显著上升61.14728_RS年.png", height=5, width=7)
+plot_fuzz_Positive_first_change_hist_RS
+
+# 执行 1000 次重采样来计算 inc_sig_year 的均值
+fuzz_means_RS <- data.frame(mean = numeric())
+for(i in 1:1000) {
+  fuzz_mean_i_RS <- boots_mean(inc_sig_fuzz_data_RS$inc_sig_year, 50)
+  fuzz_means_RS <- rbind(fuzz_means_RS, data.frame(mean = fuzz_mean_i_RS))
+}
+# 计算所有重采样均值的平均值
+fuzz_Mean_mean_RS <- mean(fuzz_means_RS$mean, na.rm = TRUE)
+
+# 绘制重采样均值的直方图，并添加一个垂直线表示均值的平均值
+ggplot(fuzz_means_RS, aes(x = mean)) +
+  geom_histogram(bins = 30, fill = "gray", col = "black") +
+  geom_vline(xintercept = fuzz_Mean_mean_RS, color = "red", size=1) +
+  ylab("Frequency") +
+  xlab("Bootstrap Mean of First Year of Significance_Rs") +
+  ggtitle("Histogram of Bootstrap Means of First Year of Significance (Error = 0.19)") -> plot_fuzz_bootstrap_hist_RS
+#save_agu_plot("fuzz_MEAN_BOOTSTRAP61.01816y_RS.png")
+
+#-------------------------------------------------------------------------------------------------------------------------------------
+#分组显示分布
+breaks <- c(4, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 112)
+labels <- c("4~20", "20~30", "30~40", "40~50", "50~60", "60~70", "70~80", "80~90", "90~100", "100~110", "110~112")
+inc_sig_fuzz_data_RH$Group <- cut(inc_sig_fuzz_data_RH$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)       #analyzed_until中INC_INSIG数据都设置为112，重新分组计算的占比，是否需要把INC_INSIG加入到计算比例中？？如不加，那么0~30年这部分占比高于error为0时的情况！！
+colors <- c("#f0fe35", "#a3d393", "#70c17f",  "#f7afb9", "#f172ad", "#be86ba", "#8b66b8" , "#c63596" , "#51c4c2", "#4068b2", "#4583b3")
+filtered_inc_sig_fuzz_data_RH <- inc_sig_fuzz_data_RH %>%
+  filter(!is.na(Group))
+# 绘制地图
+G_PFC_fuzz_RH <- ggplot(data = filtered_inc_sig_fuzz_data_RH) + 
+  geom_tile(aes(x = lon, y = lat, fill = Group)) + 
+  scale_fill_manual(values = colors, labels = labels, guide = guide_legend(title = "First Year of Significance")) +
+  labs(title = "d", x = "Longitude", y = "Latitude") +
+  coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+  ylim(-60, 90)+
+  theme(legend.position = "none",    
+        panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)
+print(G_PFC_fuzz_RH) 
+
+breaks_counts_RH <- filtered_inc_sig_fuzz_data_RH %>%
+  group_by(Group) %>%
+  summarise(Count = n())
+total_count_RH <- sum(breaks_counts_RH$Count)
+breaks_counts_RH <-breaks_counts_RH %>%
+  mutate(Percentage = (Count / total_count_RH) * 100)
+print(breaks_counts_RH)
+#---------------------------------------------------------------------------------------------------------------------------------------------------
+inc_sig_fuzz_data_RS$Group <- cut(inc_sig_fuzz_data_RS$analyzed_until, breaks = breaks, labels = labels, include.lowest = TRUE)       #analyzed_until中INC_INSIG数据都设置为112，重新分组计算的占比，是否需要把INC_INSIG加入到计算比例中？？如不加，那么0~30年这部分占比高于error为0时的情况！！
+colors <- c("#f0fe35", "#a3d393", "#70c17f",  "#f7afb9", "#f172ad", "#be86ba", "#8b66b8" , "#c63596" , "#51c4c2", "#4068b2", "#4583b3")
+filtered_inc_sig_fuzz_data_RS <- inc_sig_fuzz_data_RS %>%
+  filter(!is.na(Group))
+# 绘制地图
+G_PFC_fuzz_RS <- ggplot(data = filtered_inc_sig_fuzz_data_RS) + 
+  geom_tile(aes(x = lon, y = lat, fill = Group)) + 
+  scale_fill_manual(values = colors, labels = labels, guide = guide_legend(title = "First Year of Significance")) +
+  labs(title = "d", x = "Longitude", y = "Latitude") +
+  coord_fixed() +
+  geom_sf(data = world_continents, inherit.aes = FALSE, fill = NA, color = "black")+
+  ylim(-60, 90)+
+  theme(legend.position = "none",    
+        panel.grid.major = element_blank(), # 移除主要网格线
+    panel.grid.minor = element_blank(), # 移除次要网格线
+)
+print(G_PFC_fuzz_RS) 
+
+breaks_counts_RS <- filtered_inc_sig_fuzz_data_RS %>%
+  group_by(Group) %>%
+  summarise(Count = n())
+total_count_RS <- sum(breaks_counts_RS$Count)
+breaks_counts_RS <-breaks_counts_RS %>%
+  mutate(Percentage = (Count / total_count_RS) * 100)
+print(breaks_counts_RS)
+```
+
+```{r combine_plot}
+ combined_FIG4_B <- G_PFC_RH + G_PFC_fuzz_RH  +
+   plot_layout(guides = 'collect') &  # 收集并合并图例
+    theme(
+    legend.position = "bottom",  # 设置图例在底部
+    legend.direction = "horizontal",  # 图例方向为水平
+    legend.key.width = unit(1, "cm"),  # 设置图例键的宽度为1cm
+    legend.key.height = unit(0.5, "cm"),  # 设置图例键的高度为0.5cm
+    legend.title = element_blank(),  # 移除图例标题
+    legend.text = element_text(vjust = 0.5)  # 垂直对齐图例文本
+ 
+ )
+
+Fig_RH <- combined_FIG4_A / combined_FIG4_B
+print(Fig_RH)
+# save_agu_plot("Fig4_2.png", width = 8, height = 6)
+
+combined_FIG5_A <-  plot_4group_distribution_RS  +  plot_fuzz_4group_distribution_RS +
+   plot_layout(guides = 'collect')&
+  guides(color = guide_legend(override.aes = list(size = 5))) &  # 收集并合并图例
+   theme(legend.position = "bottom", legend.direction = "horizontal" , 
+             legend.title = element_blank())  # 移除图例标题
+  print(combined_FIG5_A)
+  
+combined_FIG5_B <-  G_PFC_RS  + G_PFC_fuzz_RS +
+plot_layout(guides = 'collect') &  # 收集并合并图例
+    theme(
+    legend.position = "bottom",  # 设置图例在底部
+    legend.direction = "horizontal",  # 图例方向为水平
+    legend.key.width = unit(1, "cm"),  # 设置图例键的宽度为1cm
+    legend.key.height = unit(0.5, "cm"),  # 设置图例键的高度为0.5cm
+    legend.title = element_blank(),  # 移除图例标题
+    legend.text = element_text(vjust = 0.5)  # 垂直对齐图例文本
+ )
+Fig_RS <- combined_FIG5_A / combined_FIG5_B
+print(Fig_RS)
+# save_agu_plot("Fig_RS.png", width = 8, height = 6)
+
+combined_hist <- ((plot_Positive_first_change_hist_RH + plot_bootstrap_hist_RH) /
+  (plot_fuzz_Positive_first_change_hist_RH + plot_fuzz_bootstrap_hist_RH) ) + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(size = 12, face = "bold"))
+ #save_agu_plot("SUPPLYFig3_RH.png", width = 13, height = 6)
+
+combined_hist_2 <- ((plot_Positive_first_change_hist_RS + plot_bootstrap_hist_RS ) /
+       (plot_fuzz_Positive_first_change_hist_RS + plot_fuzz_bootstrap_hist_RS)) + plot_annotation(tag_levels = 'a') & theme(plot.tag = element_text(size = 12, face = "bold"))
+ #save_agu_plot("SUPPLYFig2_RS.png", width = 13, height = 6)
+
+```
+
+```{r, fig.height=8, fig.width=8}
+# put figures together
+Fig3 <- plot_grid(combined_4group_fuzz_4group, combined_G_PFC_G_PFC_fuzz ,
+          nrow = 2, ncol = 1)
+print(Fig3)
+#save_agu_plot("Fig3.png", height=11, width=16)
+```
+Jian: using inline code rather than text！！！<br>
+Total cells = `r total2`. <br>
+slopes < 0 & signif > 0.05:  35.21097 % <br>
+Cells with positive slope = `r count5` or `r round(count5 / total2 * 100, 4)`%. <br>
+
+slopes < 0 & signif < 0.05:  5.833583 % <br>
+Cells with *significant* positive slope = `r count6` or `r round(count6 / total2 * 100, 4)`%. <br>
+
+slopes > 0 & signif > 0.05:  51.10986 % <br>
+Area with positive slope = `r count7` or `r round(count7 / total2 * 100, 4)`%. <br>
+
+slopes > 0 & signif < 0.05:  7.845588 % <br>
+Area with *significant* positive slope = `r count8` or `r round(count8 / total * 100, 4)`%. <br>
+
+
+## Next steps
+
+Next: make a nice graph of change over time <br> using a subset of data for readability <br> Convert array to data frame and plot rs versus time <br> with a line for each grid cell <br>
+
+## Simple: when would expect to see significance? toy-example
+
+-   We'd like to do this once for perfect data
+-   Once for data + interannual variability
+-   Once for data + iav + observational error
+
+```{r senario model, echo=FALSE}
+#nc_RH <- nc_open("data/extdata/RH_yr_Hashimoto2015.nc")  
+#co2_RH <- ncvar_get(nc_RH, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))         
+#lon_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lon$name)
+#lat_RH <- ncvar_get(nc_RH, varid = nc_RH$dim$lat$name)  
+#nc_close(nc_RH)
+
+#nc_RS <- nc_open("data/extdata/RS_yr_Hashimoto2015.nc")  
+#co2_RS <- ncvar_get(nc_RS, "co2", start = c(1, 1, 1, 1), count = c(-1, -1, 1, 112))         
+#lon_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lon$name)
+#lat_RS <- ncvar_get(nc_RS, varid = nc_RS$dim$lat$name)  
+#nc_close(nc_RS)
+
+#do_fitting_seq_grouped <- function(data, lon, lat, start_year = 1901) {
+  nyears <- dim(data)[3]
+  results <- list()
+  
+  for (i in seq_along(lon)) {
+    for (j in seq_along(lat)) {
+      ts_data <- data[i, j, ]
+      
+      # 跳过全是NA的数据点
+      if (all(is.na(ts_data))) next
+      
+      # 初始化变量
+      final_slope <- NA
+      final_signif <- NA
+      final_year_index <- NA
+      
+      for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, data = ts_data[1:n]) %>% drop_na()
+        
+        if (nrow(df) > 1) {
+          lm_fit <- lm(data ~ year_index, data = df)
+          current_slope <- coef(lm_fit)["year_index"]
+          current_signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+          
+          # 更新最终的斜率和显著性
+          final_slope <- current_slope
+          final_signif <- current_signif
+          
+          # 如果找到显著性小于0.05的情况
+          if (!is.na(current_signif) && current_signif < 0.05) {
+            final_year_index <- start_year + n - 1
+            break  # 找到显著性后停止这个网格点的分析
+          }
+        }
+      }
+      
+      # 添加结果到列表
+      results <- c(results, list(list(
+        lon = lon[i], 
+        lat = lat[j], 
+        slope = final_slope, 
+        signif = final_signif, 
+        analyzed_until = final_year_index
+      )))
+    }
+  }
+  
+  # 将列表转换为数据框
+  results_df <- bind_rows(results)
+  
+  # 计算显著上升的比例
+  inc_sig_results <- results_df %>% 
+    filter(!is.na(slope), !is.na(signif)) %>% 
+    mutate(Group = case_when(
+      slope > 0 & signif < 0.05 ~ "INC_SIG",
+      TRUE ~ "OTHER"
+    ))
+  
+  inc_sig_count <- sum(inc_sig_results$Group == "INC_SIG")
+  valid_count <- nrow(inc_sig_results)
+  
+  inc_sig_ratio <- if (valid_count > 0) inc_sig_count / valid_count else NA
+  
+  return(inc_sig_ratio)
+}
+
+# 定义fuzz函数
+fuzz_seq <- function(x, error) {
+  x * rnorm(length(x), mean = 1, sd = error)
+}
+
+# 分别处理 RH 和 RS 数据并计算显著上升的比例
+#process_and_analyze_data <- function(data, lon, lat) {
+  error_seq <- seq(0, 0.19, by = 0.01)
+  inc_sig_ratios <- list()
+
+  for (error in error_seq) {
+    co2_fuzz_seq <- fuzz_seq(data, error = error) 
+    inc_sig_ratio <- do_fitting_seq_grouped(co2_fuzz_seq, lon, lat, start_year = 1901)
+    inc_sig_ratios[[as.character(error)]] <- inc_sig_ratio
+  }
+
+#  inc_sig_ratios_df <- as.data.frame(do.call(rbind, inc_sig_ratios))
+  colnames(inc_sig_ratios_df) <- "inc_sig_ratio"
+  inc_sig_ratios_df$error <- error_seq
+
+  return(inc_sig_ratios_df)
+}
+```
+
+```{r , echo=FALSE}
+# 处理并分析 RH 数据
+#RH_ratios <- process_and_analyze_data(co2_RH, lon_RH, lat_RH)
+RH_ratios$label <- "RH"
+
+# 处理并分析 RS 数据
+#RS_ratios <- process_and_analyze_data(co2_RS, lon_RS, lat_RS)
+RS_ratios$label <- "RS"
+
+# 合并结果数据框
+#all_ratios <- bind_rows(RH_ratios, RS_ratios)
+```
+
+
+
+```{r senario model 2, echo=FALSE}
+
+# 绘制显著上升比例随误差变化的图表
+plot_INC_SIG_Ratios <- ggplot(all_ratios, aes(x = error, y = inc_sig_ratio, color = label)) +
+  geom_line() +
+  geom_point() +
+  labs(title = " ",
+       x = "Measurement Error",
+       y = "Significant Increase Ratio",
+       color = " ")  + 
+  scale_y_continuous(position = "right") + 
+    scale_x_reverse() +
+  theme_minimal()+
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),  # 添加外边框
+        legend.position = c(0.95, 0.05),  # 将图例放在右下角
+        legend.justification = c("right", "bottom"),  # 设置图例对齐方式
+        legend.box.just = "right",  # 设置图例在图框内对齐方式
+      )
+
+print(plot_INC_SIG_Ratios)
+
+```
+
+```{r senario model 2, echo=FALSE}
+#!!!!!不跑这段！！！！！！！！！！！！！！！！！！！！！！！！！！！
+inc_sig_points_RH<- out_filtered_RH %>%
+  filter(Group == "INC_SIG" )
+inc_sig_points_RH$lon <- ifelse(inc_sig_points_RH$lon < 0, inc_sig_points_RH$lon + 360, inc_sig_points_RH$lon)
+
+inc_sig_points_RS<- out_filtered_RS %>%
+  filter(Group == "INC_SIG" )
+inc_sig_points_RS$lon <- ifelse(inc_sig_points_RS$lon < 0, inc_sig_points_RS$lon + 360, inc_sig_points_RS$lon)
+
+fuzz_seq <- function(data, error) {
+  data * rnorm(length(data), mean = 1, sd = error)
+}
+
+perform_analysis <- function(ts_data, total_years = 112) {
+    nyears <- length(ts_data)  # 时间序列的长度即为年份数
+    final_year_index <- NA  # 初始化为NA，用于记录首次显著上升的年份索引
+    group <- "OTHER"  # 初始化分组
+
+    for (n in 2:nyears) {
+        df <- tibble(year_index = 1:n, co2 = ts_data[1:n]) %>% drop_na()
+
+        if (nrow(df) > 1) {
+            lm_fit <- lm(co2 ~ year_index, data = df)
+            slope <- coef(lm_fit)["year_index"]
+            signif <- summary(lm_fit)$coefficients["year_index", "Pr(>|t|)"]
+
+            if (!is.na(slope) && !is.na(signif)) {
+                if (slope > 0 && signif < 0.05) {
+                    final_year_index <- n  # 记录发现显著上升所需的年限
+                    group <- "INC_SIG"
+                    break  # 发现显著上升后停止分析
+                } else if (slope > 0 && signif >= 0.05) {
+                    group <- "INC_INSIG"  # 上升但不显著，不改变final_year_index，但标记为INC_INSIG
+                } else {
+                    group <- "OTHER"  # 其他情况，继续保持OTHER分组
+                }
+            }
+        }
+    }
+
+    # 如果是上升但不显著的情况，且没有找到显著性增长的年份，则设置为112年
+    if (is.na(final_year_index) && group == "INC_INSIG") {
+        final_year_index <- total_years
+    }
+
+    return(list(final_year_index = final_year_index, group = group))
+}
+
+resample_and_compute_stats <- function(data, n = 1000, sample_size = 50, ci = 0.95, error_value) {
+  if (length(data) < sample_size) {
+    warning(paste("Data length is less than sample size for error:", error_value))
+    return(list(mean_value = NA, lower_bound = NA, upper_bound = NA, sampled_means = NA, plot_hist = NULL,
+                initial_plot_hist = NULL, initial_mean_value = NA))
+  }
+  
+  # 计算初始数据的均值
+  initial_mean_value <- mean(data, na.rm = TRUE)
+  
+  # 绘制初始数据的直方图
+  initial_plot_hist <- ggplot(data.frame(mean = data), aes(x = mean)) +
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = initial_mean_value, color = "red", size = 1) +
+    ylab("Frequency") +
+    xlab("Initial Data Mean of First Year of Significance") +
+    ggtitle(paste("Histogram of Initial Data Means (Slope > 0) - Error:", error_value))
+  
+  # 进行重采样
+  sampled_means <- replicate(n, mean(sample(data, size = sample_size, replace = TRUE), na.rm = TRUE))
+  lower_bound <- quantile(sampled_means, (1 - ci) / 2)
+  upper_bound <- quantile(sampled_means, 1 - (1 - ci) / 2)
+  mean_value <- mean(sampled_means)
+  
+  # 绘制重采样数据的直方图
+  plot_hist <- ggplot(data.frame(mean = sampled_means), aes(x = mean)) +
+    geom_histogram(bins = 30, fill = "gray", col = "black") +
+    geom_vline(xintercept = mean_value, color = "red", size = 1) +
+    ylab("Frequency") +
+    xlab("Bootstrap Mean of First Year of Significance") +
+    ggtitle(paste("Histogram of Bootstrap Means (Slope > 0) - Error:", error_value))
+  
+  # 返回重采样平均值及置信区间的列表，并包括初始数据和重采样数据的直方图
+  return(list(
+    mean_value = mean_value, 
+    lower_bound = lower_bound, 
+    upper_bound = upper_bound, 
+    sampled_means = sampled_means, 
+    plot_hist = plot_hist,
+    initial_plot_hist = initial_plot_hist,
+    initial_mean_value = initial_mean_value  # 添加初始均值
+  ))
+}
+
+
+process_data_for_error <- function(co2, lon, lat, inc_sig_points, error, resample_func) {
+    sig_up_years <- numeric()
+    
+    for (i in 1:nrow(inc_sig_points)) {
+        lon_index <- which(lon == inc_sig_points$lon[i])
+        lat_index <- which(lat == inc_sig_points$lat[i])
+        original_ts_data <- co2[lon_index, lat_index, ]
+        
+        fuzzed_ts_data <- fuzz_seq(original_ts_data, error)
+        
+        analysis_result <- perform_analysis(fuzzed_ts_data)
+        final_year_index <- analysis_result$final_year_index
+        
+        if (!is.na(final_year_index)) {
+            sig_up_years <- c(sig_up_years, final_year_index)
+        }
+    }
+    
+    if (length(sig_up_years) == 0) {
+        warning(paste("No significant increase years found for error:", error))
+    } else {
+        print(paste("Processing error:", error, "Number of significant years:", length(sig_up_years)))
+    }
+    
+    stats <- resample_func(sig_up_years, error_value = error)
+    return(stats)
+}
+
+
+# 首先创建一个空的数据框
+stats_for_errors_RH <- data.frame(
+  error = numeric(),
+  mean_value = numeric(),
+  lower_bound = numeric(),
+  upper_bound = numeric()
+)
+initial_means_RH <- data.frame(
+  error = numeric(),
+  initial_mean_value = numeric()
+)
+
+stats_for_errors_RS <- data.frame(
+  error = numeric(),
+  mean_value = numeric(),
+  lower_bound = numeric(),
+  upper_bound = numeric()
+)
+initial_means_RS <- data.frame(
+  error = numeric(),
+  initial_mean_value = numeric()
+)
+
+error_seq <- seq(0.19, 0, by = -0.01)
+
+
+# 处理 RH 数据
+stats_for_errors_RH <- data.frame()
+for (error in error_seq) {
+   stats_RH <- process_data_for_error(co2_RH, lon_RH, lat_RH, inc_sig_points_RH, error, resample_and_compute_stats)
+  
+  # 检查stats不为空，并且包含所需的索引
+  if (!is.null(stats_RH) && all(c("mean_value", "lower_bound", "upper_bound", "plot_hist", "initial_plot_hist", "initial_mean_value") %in% names(stats_RH))) {
+    # 将结果及当前的 error 值添加到数据框
+    stats_for_errors_RH <- rbind(stats_for_errors_RH, data.frame(
+      error = error,
+      mean_value = stats_RH$mean_value, 
+      lower_bound = stats_RH$lower_bound, 
+      upper_bound = stats_RH$upper_bound
+    ))
+    
+    # 保存初始数据的均值
+    initial_means_RH <- rbind(initial_means_RH, data.frame(
+      error = error,
+      initial_mean_value = stats_RH$initial_mean_value
+    ))
+    
+    ggsave(filename = paste0("hist_RH_error_initial_", error, ".png"), plot = stats_RH$initial_plot_hist)
+    ggsave(filename = paste0("hist_RH_error_bootstrap_", error, ".png"), plot = stats_RH$plot_hist)
+    
+    # 打印直方图
+    print(stats_RH$initial_plot_hist)
+    print(stats_RH$plot_hist)
+    
+  }
+}
+write.csv(stats_for_errors_RH, "stats_for_errors_RH.csv", row.names = FALSE)
+write.csv(initial_means_RH, "initial_means_RH.csv", row.names = FALSE)
+
+
+# 处理 RS 数据
+stats_for_errors_RS <- data.frame()
+for (error in error_seq) {
+  stats_RS <- process_data_for_error(co2_RS, lon_RS, lat_RS, inc_sig_points_RS, error, resample_and_compute_stats)
+  
+  # 检查stats不为空，并且包含所需的索引
+  if (!is.null(stats_RS) && all(c("mean_value", "lower_bound", "upper_bound", "plot_hist", "initial_plot_hist", "initial_mean_value") %in% names(stats_RS))) {
+    # 将结果及当前的 error 值添加到数据框
+    stats_for_errors_RS <- rbind(stats_for_errors_RS, data.frame(
+      error = error,
+      mean_value = stats_RS$mean_value, 
+      lower_bound = stats_RS$lower_bound, 
+      upper_bound = stats_RS$upper_bound
+    ))
+     # 保存初始数据的均值
+    initial_means_RS <- rbind(initial_means_RS, data.frame(
+      error = error,
+      initial_mean_value = stats_RS$initial_mean_value
+    ))
+    ggsave(filename = paste0("hist_RS_error_initial_", error, ".png"), plot = stats_RS$initial_plot_hist)
+    ggsave(filename = paste0("hist_RS_error_bootstrap_", error, ".png"), plot = stats_RS$plot_hist)
+   
+    print(stats_RS$initial_plot_hist)
+    print(stats_RS$plot_hist)
+  }
+}
+
+write.csv(stats_for_errors_RS, "stats_for_errors_RS.csv", row.names = FALSE)
+write.csv(initial_means_RH, "initial_means_RS.csv", row.names = FALSE)
+```
+
+
+```{r plot1, echo=FALSE}
+# 绘制 RH 数据显著上升比例随误差变化的图表
+plot_INC_SIG_Ratios_RH <- ggplot(RH_ratios, aes(x = error, y = inc_sig_ratio)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Significant Increase Ratios vs. Error (RH)",
+       x = "Error",
+       y = "Significant Increase Ratio")  +
+    scale_x_reverse()+
+  theme_minimal()
+
+print(plot_INC_SIG_Ratios_RH)
+#save_agu_plot("scnario_INC_SIG_Ratios_RH.png")
+
+
+# 绘制 RS 数据显著上升比例随误差变化的图表
+plot_INC_SIG_Ratios_RS <- ggplot(RS_ratios, aes(x = error, y = inc_sig_ratio)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Significant Increase Ratios vs. Error (RS)",
+       x = "Error",
+       y = "Significant Increase Ratio")  +
+    scale_x_reverse()+
+  theme_minimal()
+
+print(plot_INC_SIG_Ratios_RS)
+#save_agu_plot("scnario_INC_SIG_Ratios_Rs.png")
+
+
+#write.csv(RH_ratios, file = "RH_ratios.csv", row.names = FALSE)
+#write.csv(RS_ratios, file = "RS_ratios.csv", row.names = FALSE)
+# 绘制图形
+plot_INC_SIG_Ratios_RH <- read.csv("RH_ratios.csv")
+plot_INC_SIG_Ratios_RH <- ggplot(plot_INC_SIG_Ratios_RH, aes(x = error, y = inc_sig_ratio)) +
+  geom_line(color = "#397FC7") +
+  geom_point(color = "#397FC7") +
+  labs(title = "b",
+       x = "Measurement Error",
+       y = "Significant Increase Ratio") +
+    scale_x_reverse() +
+  scale_y_continuous(position = "right") + 
+theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1))
+  plot_INC_SIG_Ratios_RH
+#save_agu_plot("0.19RH_ratios.png")
+
+plot_INC_SIG_Ratios_RS <- read.csv("RS_ratios.csv")
+plot_INC_SIG_Ratios_RS <- ggplot(plot_INC_SIG_Ratios_RS, aes(x = error, y = inc_sig_ratio)) +
+  geom_line(color = "#397FC7") +
+  geom_point(color = "#397FC7") +
+  labs(title = "b",
+       x = "Measurement Error",
+       y = "Significant Increase Ratio") +
+    scale_x_reverse() +
+  scale_y_continuous(position = "right") + 
+  theme_minimal() +
+    theme(panel.border = element_rect(color = "black", fill = NA, size = 1))
+  plot_INC_SIG_Ratios_RS
+#save_agu_plot("0.19RS_ratios.png")
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------
+  #组合直方图
+error_seq <- seq(0, 0.19, by = 0.01)
+# 定义字母序列
+labels <- letters[1:length(error_seq)]  
+# 设置标准尺寸
+standard_width <- 800
+standard_height <- 600
+
+# 读取并组合图像
+for (i in seq_along(error_seq)) {
+  error <- error_seq[i]
+  error_str <- sprintf("%.2f", error)
+  
+  # 生成文件名
+  initial_file <- paste0("hist_RH_error_initial_", error_str, ".png")
+  bootstrap_file <- paste0("hist_RH_error_bootstrap_", error_str, ".png")
+  
+  if (file.exists(initial_file) && file.exists(bootstrap_file)) {
+    # 读取并调整图像大小
+    initial_img <- image_read(initial_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    bootstrap_img <- image_read(bootstrap_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    
+    # 获取当前字母编号
+    letter <- labels[i]
+    
+    # 添加编号标签，带括号，并在图像外边框内部的左上角
+    initial_img <- image_annotate(initial_img, paste0("(", letter, "1)"), size = 40,
+                                  gravity = "northwest", location = "+70+60")
+    bootstrap_img <- image_annotate(bootstrap_img, paste0("(", letter, "2)"), size = 40,
+                                    gravity = "northwest", location = "+70+60")
+    
+    # 转换为矩阵对象
+    initial_raster <- rasterGrob(as.raster(initial_img), interpolate = TRUE)
+    bootstrap_raster <- rasterGrob(as.raster(bootstrap_img), interpolate = TRUE)
+    
+    # 使用 gridExtra 组合图像
+    combined_plot <- grid.arrange(initial_raster, bootstrap_raster, ncol = 2)
+    
+    # 将组合图像保存为临时文件
+    temp_file <- paste0("temp_combined_hist_RH_error_", error_str, ".png")
+    ggsave(filename = temp_file, plot = combined_plot, width = 16, height = 12, units = "in")
+    
+    # 读取并裁剪保存的组合图像
+    combined_img_RH <- image_read(temp_file) %>%
+      image_trim()  # 裁剪去除空白部分
+    
+    # 保存裁剪后的图像
+    trimmed_file <- paste0("trimmed_combined_hist_RH_error_", error_str, ".png")
+    image_write(combined_img_RH, path = trimmed_file)
+    
+    # 删除临时文件
+    file.remove(temp_file)
+    
+    # 显示裁剪后的图像
+    print(combined_img_RH)
+  } else {
+    warning(paste("Files not found for error:", error_str))
+  }
+}
+# 设置 A4 尺寸（单位为英寸）
+a4_width <- 8.27
+a4_height <- 11.69
+
+# 设置每页显示的图像数量
+images_per_page <- 10
+page_count <- ceiling(length(error_seq) / images_per_page)
+
+# 遍历每个页面
+for (page in 1:page_count) {
+  # 计算当前页面的图像索引
+  start_idx <- (page - 1) * images_per_page + 1
+  end_idx <- min(page * images_per_page, length(error_seq))
+  
+  # 读取并组合当前页面的图像
+  img_list <- list()
+  for (i in start_idx:end_idx) {
+    error <- error_seq[i]
+    error_str <- sprintf("%.2f", error)
+    
+    # 生成文件名
+    trimmed_file <- paste0("trimmed_combined_hist_RH_error_", error_str, ".png")
+    
+    if (file.exists(trimmed_file)) {
+      # 读取图像
+      img <- rasterGrob(as.raster(image_read(trimmed_file)), interpolate = TRUE)
+      img_list[[i - start_idx + 1]] <- img
+    }
+  }
+  
+  # 组合当前页面的图像
+  combined_plot_RH <- marrangeGrob(grobs = img_list, nrow = 5, ncol = 2)
+  
+  # 保存为 A4 尺寸的 PDF 文件
+  output_file_RH <- paste0("RHcombined_page_", page, ".pdf")
+  ggsave(output_file_RH, plot = combined_plot_RH, device = "pdf", width = a4_width, height = a4_height)
+  
+  # 显示页面预览
+  print(combined_plot_RH)
+}
+
+
+# 读取并组合图像
+for (i in seq_along(error_seq)) {
+  error <- error_seq[i]
+  error_str <- sprintf("%.2f", error)
+  
+  # 生成文件名
+  initial_file <- paste0("hist_RS_error_initial_", error_str, ".png")
+  bootstrap_file <- paste0("hist_RS_error_bootstrap_", error_str, ".png")
+  
+  if (file.exists(initial_file) && file.exists(bootstrap_file)) {
+    # 读取并调整图像大小
+    initial_img <- image_read(initial_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    bootstrap_img <- image_read(bootstrap_file) %>%
+      image_resize(paste0(standard_width, "x", standard_height, "!"))
+    
+    # 获取当前字母编号
+    letter <- labels[i]
+    
+    # 添加编号标签，带括号，并在图像外边框内部的左上角
+    initial_img <- image_annotate(initial_img, paste0("(", letter, "1)"), size = 40,
+                                  gravity = "northwest", location = "+70+60")
+    bootstrap_img <- image_annotate(bootstrap_img, paste0("(", letter, "2)"), size = 40,
+                                    gravity = "northwest", location = "+70+60")
+    
+    # 转换为矩阵对象
+    initial_raster <- rasterGrob(as.raster(initial_img), interpolate = TRUE)
+    bootstrap_raster <- rasterGrob(as.raster(bootstrap_img), interpolate = TRUE)
+    
+    # 使用 gridExtra 组合图像
+    combined_plot <- grid.arrange(initial_raster, bootstrap_raster, ncol = 2)
+    
+    # 将组合图像保存为临时文件
+    temp_file <- paste0("temp_combined_hist_RS_error_", error_str, ".png")
+    ggsave(filename = temp_file, plot = combined_plot, width = 16, height = 12, units = "in")
+    
+    # 读取并裁剪保存的组合图像
+    combined_img <- image_read(temp_file) %>%
+      image_trim()  # 裁剪去除空白部分
+    
+    # 保存裁剪后的图像
+    trimmed_file <- paste0("trimmed_combined_hist_RS_error_", error_str, ".png")
+    image_write(combined_img, path = trimmed_file)
+    
+    # 删除临时文件
+    file.remove(temp_file)
+    
+    # 显示裁剪后的图像
+    print(combined_img)
+  } else {
+    warning(paste("Files not found for error:", error_str))
+  }
+}
+# 设置 A4 尺寸（单位为英寸）
+a4_width <- 8.27
+a4_height <- 11.69
+
+# 设置每页显示的图像数量
+images_per_page <- 10
+page_count <- ceiling(length(error_seq) / images_per_page)
+
+# 遍历每个页面
+for (page in 1:page_count) {
+  # 计算当前页面的图像索引
+  start_idx <- (page - 1) * images_per_page + 1
+  end_idx <- min(page * images_per_page, length(error_seq))
+  
+  # 读取并组合当前页面的图像
+  img_list <- list()
+  for (i in start_idx:end_idx) {
+    error <- error_seq[i]
+    error_str <- sprintf("%.2f", error)
+    
+    # 生成文件名
+    trimmed_file <- paste0("trimmed_combined_hist_RS_error_", error_str, ".png")
+    
+    if (file.exists(trimmed_file)) {
+      # 读取图像
+      img <- rasterGrob(as.raster(image_read(trimmed_file)), interpolate = TRUE)
+      img_list[[i - start_idx + 1]] <- img
+    }
+  }
+  
+  # 组合当前页面的图像
+  combined_plot_RS <- marrangeGrob(grobs = img_list, nrow = 5, ncol = 2)
+  
+  # 保存为 A4 尺寸的 PDF 文件
+  output_file <- paste0("RScombined_page_", page, ".pdf")
+  ggsave(output_file, plot = combined_plot_RS, device = "pdf", width = a4_width, height = a4_height)
+  
+  # 显示页面预览
+  print(combined_plot_RS)
+}
+```
+
+```{r plot2, echo=FALSE}
+# 绘制 RH 和 RS 数据的显著上升比例随误差变化的图表
+plot_INC_SIG_Mean_Year <- ggplot(stats_for_errors, aes(x = error, y = mean_value, color = label)) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound, fill = label), alpha = 0.35) +
+  labs(title = " ",
+       x = "Measurement Error",
+       y = "Mean of Significant Increase Years") +
+  scale_x_reverse() +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),  # 添加外边框
+        legend.position = c(0.05, 0.05),  # 将图例放在右下角
+        legend.justification = c("left", "bottom"),  # 设置图例对齐方式
+        legend.box.just = "left",  # 设置图例在图框内对齐方式
+       legend.title = element_text(size = 0),
+      )
+
+print(plot_INC_SIG_Mean_Year)
+#save_agu_plot("scnarion_Model_plot.jpg")
+
+plot_grid( plot_INC_SIG_Mean_Year, plot_INC_SIG_Ratios,
+          ncol = 2,
+          labels = c("a", "b"))
+#save_agu_plot("Senario.png", height=4, width=10)
+#------------------------------------------------------------------------------------------------------------------------------
+# 从生成的 CSV 文件读取 RH 数据
+stats_for_errors_RH <- read.csv("stats_for_errors_RH.csv")
+plot_RH <- ggplot(stats_for_errors_RH, aes(x = error, y = mean_value, color = "RH", fill = "RH")) +
+  geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), alpha = 0.35) +
+  labs(title = " ",
+       x = "Measurement Error",
+       y = "Mean of Significant Increase Years") +
+  scale_x_reverse() +
+  scale_color_manual(values = c("RH" = "#397FC7"), name = "Legend") +
+  scale_fill_manual(values = c("RH" = "#B0E1E7"), name = "Legend") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),  # 添加外边框
+        legend.position = c(0.05, 0.05),  # 将图例放在右下角
+        legend.justification = c("left", "bottom"),  # 设置图例对齐方式
+        legend.box.just = "left",  # 设置图例在图框内对齐方式
+        legend.title = element_text(size = 0))
+
+print(plot_RH)
+#ggsave("plot_RH.jpg", plot = plot_RH)
+
+
+# 从生成的 CSV 文件读取 RS 数据
+stats_for_errors_RS <- read.csv("stats_for_errors_RS.csv")
+plot_RS <- ggplot(stats_for_errors_RS, aes(x = error, y = mean_value, color = "RS", fill = "RS")) +
+ geom_line() +
+  geom_point() +
+  geom_ribbon(aes(ymin = lower_bound, ymax = upper_bound), alpha = 0.35) +
+  labs(title = " ",
+       x = "Measurement Error",
+       y = "Mean of Significant Increase Years") +
+  scale_x_reverse() +
+ scale_color_manual(values = c("RS" = "#397FC7"), name = "Legend") +
+  scale_fill_manual(values = c("RS" = "#B0E1E7"), name = "Legend") +
+  theme_minimal() +
+  theme(panel.border = element_rect(color = "black", fill = NA, size = 1),  # 添加外边框
+       legend.position = c(0.05, 0.05),  # 将图例放在右下角
+        legend.justification = c("left", "bottom"),  # 设置图例对齐方式
+        legend.box.just = "left",  # 设置图例在图框内对齐方式
+        legend.title = element_text(size = 0))
+print(plot_RS)
+#ggsave("plot_RS.jpg", plot = plot_RS)
+
+plot_grid( plot_RH, plot_INC_SIG_Ratios_RH,
+          ncol = 2,
+          labels = c("a", "b"))
+#save_agu_plot("Senario_RH.png", height=4, width=10)
+
+plot_grid( plot_RS, plot_INC_SIG_Ratios_RS,
+          ncol = 2,
+          labels = c("a", "b"))
+#save_agu_plot("Senario_RS.png", height=4, width=10)
+```
+
+```{r simple toy-example, echo=FALSE}
+set.seed(1234)
+
+#trend_emergence 的函数，用于计算趋势的 p 值。函数的输入参数为 rd 和 theilsen（默认为 F，即 False）。在函数内部，首先创建了一个与输入数据 rd 长度相同的整数序列 Year，用于表示年份。
+trend_emergence <- function(rd, theilsen = F) {
+  Year <- seq_len(length(rd))    
+  trend_p <- rep(NA, length(rd))
+  for(i in seq_along(trend_p)) {             #seq_along(，创建一个与trend_p长度相同的整数向量，以便在后续的循环中使用
+    if(i > 2) {
+      if(theilsen) {
+        df <- tibble(Year = Year[1:i], rd = rd[1:i])       #for循环中，每次将数据框df的行数增加1，然后用mblm函数拟合回归模型。
+        suppressWarnings(m <- mblm::mblm(rd ~ Year, data = df))  # mblm doesn't like form below
+      } else {
+        m <- suppressWarnings(lm(rd[1:i] ~ Year[1:i]))         #suppressWarnings(忽略警告信息
+      }
+      # Extract 2nd row (Year) and 4th column (Pr>[t] or Pr>|V|)
+      trend_p[i] <- summary(m)$coefficients[2, 4]
+    }
+  }
+  trend_p
+}
+
+
+# Temperature has risen 0.9 C in 40 years, more or less
+dTdt <- round(0.9 / 40.0, 3)         
+q10 <- 2
+R0 = 1.0                             # dTdt（每年温度上升的值），q10（每 10 摄氏度温度变化引起呼吸速率变化的倍数）和 R0（初始呼吸速率）。
+respdata <- tibble(Year = 1:100, 
+                   Temp = dTdt * Year,                #温度的计算基于 dTdt 和年份之间的线性关系
+                   Resp = R0 * q10 ^ (Temp / 10),     #呼吸速率的计算基于初始呼吸速率以及温度和 q10 之间的指数关系
+                         # This is interannual variability
+                   Resp_iav = fuzz(Resp, 0.098),  # this is SRDB Rs_interannual_err  #考虑了年际变异性的呼吸速率（Resp_iav）   
+                   Resp_fuzz = fuzz(Resp_iav, median_error))    
+                         #使用 fuzz 函数为年际变异性呼吸速率添加了观测误差，得到了最终的呼吸速率数据（Resp_fuzz
+
+# Make a nice plot--first with ideal curve, 
+p <- ggplot(respdata, aes(Year, Resp)) +      #考虑了温度\ q10\年际变异性\观测误差的呼吸速率
+  geom_point(color = "grey") +  
+  ylab("Respiration") + coord_cartesian(ylim = c(0.75, 1.5)) +       #coord_cartesian 函数设置 y 轴坐标范围为 0.75 到 1.5
+  annotate("text", 10, 1.4, label = paste("Q10 =", q10)) + 
+  annotate("text", 10, 1.3, label = paste("dT/dt =", dTdt))   #使用 annotate 函数在坐标位置 (10, 1.4) 和 (10, 1.3) 添加标注参数 q10 和 dTdt 
+p
+
+# then IAV
+p <- p + geom_point(aes(y = Resp_iav))  
+          #在之前定义的绘图对象 p 的基础上使用 geom_point 函数添加新的点图层，将 y 映射设置为 Resp_iav(#考虑了年际变异性的呼吸速率（Resp_iav）)
+p
+
+# then observations
+p <- p + 
+  geom_errorbar(aes(ymin = Resp_iav - Resp_iav * median_error,
+                    ymax = Resp_iav + Resp_iav * median_error))
+       #在 p 的基础上再次使用 geom_errorbar 函数添加了观测误差的显示，设置 ymin 和 ymax
+p
+
+# add idea trend line
+p + geom_line(aes(y = Resp), color = "red", size = 2)
+
+# add line with interannual variability
+p + geom_line(aes(y = Resp), color = "pink", size = 2) +
+  geom_line(aes(y = Resp_iav), color = "red", size = 2)
+
+# add real soil respiration observation trend
+p + geom_line(aes(y = Resp), color = "pink", size = 2) +      
+          #pink line  Resp = R0 * q10 ^ (Temp / 10);  Temp = dTdt * Year,根据理想气温和假设的温度敏感性计算的土壤呼吸速率
+  geom_line(aes(y = Resp_iav), color = "pink", size = 2) +
+          #考虑了年际变异性的呼吸速率（Resp_iav）
+  geom_line(aes(y = Resp_fuzz), color = "red", size = 2)
+          #添加了观测误差得到最终的呼吸速率
+          
+# creat a function for trend analysis
+do_sim <- function(i, respdata, error = 0.0) {
+  # This is observational error
+  respdata$Resp_fuzz <- fuzz(respdata$Resp_iav, error)
+  respdata$trend_p <- trend_emergence(respdata$Resp_fuzz)
+  respdata
+}     # do_sim 函数，接受三个参数：i、respdata 和 error；在 respdata 数据框中添加了观测误差，并计算了趋势值；最后，返回修改后的 respdata。
+
+# run the analysis and store the results
+results <- list()
+library(parallel)
+n_sims <- 100
+results <- mclapply(seq_len(n_sims), do_sim, respdata, error = median_error)
+      #调用 mclapply 函数并行地运行 do_sim 函数多次，每次传递一个不同的 i 值和相同的 respdata 和 error 参数。其他并行计算函数，如 foreach 和 parallel::parLapply
+
+# summary results
+results %>% 
+  bind_rows %>% 
+  group_by(Year) %>%       #bind_rows 函数将 results 列表中的每个元素（即每次运行的结果）合并为一个数据框。 group_by 函数按照 Year 列对数据进行分组
+  summarise(n = n(),      
+            Temp = mean(Temp), 
+            Resp = mean(Resp),
+            Resp_iav_sd = sd(Resp_iav),
+            Resp_iav = mean(Resp_iav),
+            Resp_fuzz_sd = sd(Resp_fuzz),          
+            Resp_fuzz = mean(Resp_fuzz), 
+            trend_p_sd = sd(trend_p), 
+            trend_p = mean(trend_p)) %>% 
+  filter(!is.na(trend_p)) ->  
+  results_summary     #summarise 函数计算每个年份的统计指标，包括观测数目 n、平均温度 Temp、平均呼吸 Resp、呼吸的观测误差标准差 Resp_iav_sd、  平均观测误差 Resp_iav、  观测误差的标准差 Resp_fuzz_sd  、平均观测误差 Resp_fuzz、  趋势值的标准差 trend_p_sd 和  平均趋势值 trend_p。
+
+# plot the trend analysis result
+p_TheilSen <- ggplot(results_summary, aes(Year, trend_p, color = trend_p < 0.05)) +   
+  #使用 ggplot 函数创建一个基础图形，并设置 x 轴为 Year，y 轴为 trend_p。通过 geom_point 添加散点图并根据 trend_p < 0.05 进行颜色编码
+  geom_point() +    
+  geom_line(aes(y = Resp_fuzz)) +
+  geom_line(aes(y = Resp), color = "grey") +
+  geom_ribbon(aes(ymin = Resp_fuzz - Resp_fuzz_sd,      #使用 geom_ribbon 函数添加一个带有透明度的填充区域，设置填充区域上下边界的数值并根据 trend_p < 0.05 颜色和填充来表示趋势值的显著性。
+                  ymax = Resp_fuzz + Resp_fuzz_sd, 
+                  fill = trend_p < 0.05), color = NA, alpha = I(0.35)) +  
+                                    #color 参数设为 NA，以隐藏填充区域的边框颜色。alpha 参数设置透明度为 0.35
+  guides(color = FALSE, fill = FALSE) +     
+                              #guides 函数将图例中的颜色和填充隐藏，因为之前已经通过颜色和填充来表示趋势值的显著性
+  annotate("text", 10, 1.5, label = paste("N =", n_sims)) +
+  ylab("Theil-sen p-value   ///   Respiration")
+
+print(p_TheilSen)
+
+##save_agu_plot("p_TheilSen.png")
+```
+
+```{r, fig.height=8, fig.width=8}
+# put figures together
+plot_grid(plot_signif, plot_IRGA_cv, plot_signif_after, 
+          ncol = 1,
+          labels = c("a", "b", "c"))
+#save_agu_plot("IRGA_cv.png", height=8, width=8)
+```
+
+We then analyzed the trend of annual RS time series for all grid cells (n=`r ncells`). The results turn out that about `r signif_pos_slope`% cells (Figure S7, panel a) showed a significant (p\<0.05) possitive trend. However, in the field experiment, measurement error should be considered. We obtained the annual RS interannual variability from the newest version of global soil respiration database (SRDB-V5). In addition, we obtained the instantaneous RS flux measurement variability from a community database for continuous soil respiration and other soil-atmosphere greenhouse gas flux data (COSORE23). The results show that RS interannual variability is about `r round(median_interann_cv,2)*100`% of annual RS, and instantaneous RS flux measurement variability is about `r round(median_error, 2)*100`% of measurement mean (Figure S7, panel b). When RS measurement variability was considered, only \~`r round (signif_pos_slope / ncells * 100, 0)`% (Figure S7, panel c) of cells showed a significant increase trend.
